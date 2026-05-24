@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "nothingclaw": {
+      "command": "bun",
+      "args": ["run", "src/mcp/server.ts"]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Local environment & credentials — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Runtime / state — contains DB, WhatsApp linked-device auth, downloaded media
+data/
+
+# Agent's long-term memory — contains personal info it has learned about you.
+# A starter file ships as MEMORY.template.md; setup.sh copies it to MEMORY.md.
+MEMORY.md
+
+# Logs
+*.log
+logs/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+.~*
+
+# Build artifacts (Bun typecheck doesn't emit, but just in case)
+dist/
+build/
