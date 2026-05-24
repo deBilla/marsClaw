@@ -90,6 +90,34 @@ Single process. SQLite (`data/nothingclaw.db`) is the only state:
 
 The agent CLI runs as a subprocess per incoming message. Its built-in tools (shell, file read/write/edit, glob, grep, web fetch/search) plus our tiny MCP server give it everything it needs. Voice support adds two optional Python sidecars (Whisper + Kokoro) on localhost — no Docker.
 
+## Why this is small
+
+The whole codebase is ~1500 lines of TypeScript. nothingClaw is deliberately the laziest possible implementation of a personal chat agent — and that's a feature, not a shortcut.
+
+**What we delegate to the agent CLI** (Claude Code or Gemini CLI):
+
+- The reasoning loop — multi-turn tool use, planning, retries
+- Context compaction as conversations grow
+- Built-in tools — shell, file read/write/edit, glob, grep, web fetch / search
+- LLM API auth, rate-limit handling, model selection
+- The dozens of edge cases inside those tools (timeouts, escaping, output truncation, …)
+
+That's the hardest 80% of building an agent, and full-time teams at Anthropic and Google work on it every day. Outsourcing it is leverage, not laziness.
+
+**What we actually own:**
+
+- Channel adapters (Telegram, Slack, WhatsApp) — download bytes, push bytes
+- SQLite — one table for history, one for the outbox
+- A ~70-line subprocess wrapper that runs `gemini -p` or `claude -p`
+- A tiny MCP server with channel-specific tools (`send_message`, `speak`)
+- Optional Python sidecars for Whisper + Kokoro
+
+**Compared to [NanoClaw](https://github.com/qwibitai/nanoclaw):** NanoClaw is dramatically larger because it solves a different problem — multi-tenant isolation, per-session Docker containers, credential vaulting, an entity model for users → groups → sessions. nothingClaw is single-user personal-scale; the simplicity matches the scope.
+
+**Upside of being a thin wrapper:** when Anthropic or Google ship a new model, better tool use, or improved compaction, we get it for free — no code changes, just `npm i -g @anthropic-ai/claude-code@latest`.
+
+**Tradeoff to be honest about:** we're coupled to the shape of two specific CLI binaries. If `-p` changes or stdout format shifts, we break. And subprocess-per-message has a ~1-3s cold-start that a long-running agent process wouldn't. For a personal chat agent that's fine. For a high-throughput system it wouldn't be.
+
 ## Voice (optional)
 
 WhatsApp voice notes get transcribed; the agent can reply in synthesized speech. Both directions run locally.
