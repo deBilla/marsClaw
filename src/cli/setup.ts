@@ -46,6 +46,7 @@ interface ChannelChoices {
   slackBotToken: string;
   slackAppToken: string;
   whatsappEnabled: boolean;
+  voiceEnabled: boolean;
 }
 
 async function pickProviderInteractive(): Promise<Provider> {
@@ -174,7 +175,23 @@ async function askChannels(): Promise<ChannelChoices> {
     info('  Auth state is saved to data/whatsapp-auth/ for subsequent runs.');
   }
 
-  return { telegramToken, slackBotToken, slackAppToken, whatsappEnabled };
+  // Voice (only meaningful if WhatsApp is on, but we ask regardless — easy to enable later)
+  info('\n  Voice (Whisper STT for WhatsApp voice notes):');
+  info('  Runs a local Python sidecar (faster-whisper). One-time install ~600MB.');
+  const voiceEnabled = await yesNo('  Enable voice transcription?', whatsappEnabled ? 'y' : 'n');
+  if (voiceEnabled) {
+    info('  Installing — this runs tools/setup-voice.sh (Python venv + model download).');
+    const r = spawnSync('bash', ['tools/setup-voice.sh'], { stdio: 'inherit' });
+    if (r.status !== 0) {
+      warn('  Voice install failed. You can retry later with `bun run voice install`.');
+    } else {
+      ok('  Voice installed. Starting Whisper sidecar…');
+      const s = spawnSync('bun', ['run', 'src/cli/index.ts', 'voice', 'start'], { stdio: 'inherit' });
+      if (s.status !== 0) warn('  Could not start sidecar automatically; run `bun run voice start` later.');
+    }
+  }
+
+  return { telegramToken, slackBotToken, slackAppToken, whatsappEnabled, voiceEnabled };
 }
 
 function writeEnv(provider: ProviderName, ch: ChannelChoices): void {
@@ -184,6 +201,7 @@ function writeEnv(provider: ProviderName, ch: ChannelChoices): void {
     'SLACK_BOT_TOKEN',
     'SLACK_APP_TOKEN',
     'NOTHINGCLAW_WHATSAPP',
+    'NOTHINGCLAW_VOICE',
   ]);
   const existing = existsSync('.env') ? readFileSync('.env', 'utf-8') : '';
   const lines = existing.split('\n').filter((l) => {
@@ -196,6 +214,7 @@ function writeEnv(provider: ProviderName, ch: ChannelChoices): void {
   if (ch.slackBotToken) lines.push(`SLACK_BOT_TOKEN=${ch.slackBotToken}`);
   if (ch.slackAppToken) lines.push(`SLACK_APP_TOKEN=${ch.slackAppToken}`);
   if (ch.whatsappEnabled) lines.push('NOTHINGCLAW_WHATSAPP=1');
+  if (ch.voiceEnabled) lines.push('NOTHINGCLAW_VOICE=1');
   const out = lines.join('\n').replace(/\n+$/, '') + '\n';
   writeFileSync('.env', out);
 }

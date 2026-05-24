@@ -1,5 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
-import type { Channel, ChannelInit } from './types.ts';
+import { createReadStream } from 'node:fs';
+import type { Channel, ChannelInit, SendOpts } from './types.ts';
 
 export interface TelegramOptions extends ChannelInit {
   token: string;
@@ -24,11 +25,15 @@ export function createTelegramChannel(opts: TelegramOptions): Channel {
   bot.on('polling_error', (err) => console.error('[telegram] polling', err));
 
   return {
-    async send(threadId: string, text: string) {
+    async send(threadId: string, text: string, opts?: SendOpts) {
       if (!threadId.startsWith(PREFIX)) {
         throw new Error(`telegram channel cannot send to thread ${threadId}`);
       }
       const chatId = threadId.slice(PREFIX.length);
+      if (opts?.audioPath) {
+        await bot.sendVoice(chatId, createReadStream(opts.audioPath));
+        return;
+      }
       for (const part of chunk(text, TG_MAX)) {
         await bot.sendMessage(chatId, part);
       }

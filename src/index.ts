@@ -61,16 +61,26 @@ if (router.list().length === 0) {
   process.exit(1);
 }
 
-// Outbox drain — delivers messages the agent queued via mcp send_message.
+// Outbox drain — delivers messages the agent queued via mcp send_message / speak.
+// `draining` guard prevents concurrent ticks from racing on the same row:
+// without it, a slow send (e.g. while WhatsApp is reconnecting) gets re-fetched
+// by the next tick and delivered multiple times.
+let draining = false;
 const drainTimer = setInterval(async () => {
-  const pending = takePendingOutbox(db, 20);
-  for (const row of pending) {
-    try {
-      await router.send(row.thread_id, row.text);
-      markOutboxDelivered(db, row.id);
-    } catch (err) {
-      console.error(`[outbox] deliver ${row.id}`, err);
+  if (draining) return;
+  draining = true;
+  try {
+    const pending = takePendingOutbox(db, 20);
+    for (const row of pending) {
+      try {
+        await router.send(row.thread_id, row.text, row.audio_path ? { audioPath: row.audio_path } : undefined);
+        markOutboxDelivered(db, row.id);
+      } catch (err) {
+        console.error(`[outbox] deliver ${row.id}`, err);
+      }
     }
+  } finally {
+    draining = false;
   }
 }, 500);
 

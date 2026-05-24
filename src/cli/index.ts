@@ -19,6 +19,9 @@ switch (cmd) {
   case 'whatsapp':
     await import('./whatsapp.ts');
     break;
+  case 'voice':
+    await import('./voice.ts');
+    break;
   case 'help':
   case '--help':
   case '-h':
@@ -42,6 +45,7 @@ Commands:
   status                      Show provider, db stats, recent activity
   provider [gemini|claude]    Switch agent provider (interactive if no arg)
   whatsapp <sub>              WhatsApp ops (reset | status | clear-media)
+  voice <sub>                 Voice (Whisper) ops (install | start | stop | status)
   help                        Print this message
 `);
 }

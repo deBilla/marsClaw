@@ -8,7 +8,7 @@
 //   - Event subscriptions: message.im (DMs), app_mention (channels)
 
 import { App, LogLevel } from '@slack/bolt';
-import type { Channel, ChannelInit } from './types.ts';
+import type { Channel, ChannelInit, SendOpts } from './types.ts';
 
 export interface SlackOptions extends ChannelInit {
   botToken: string;
@@ -57,7 +57,9 @@ export async function createSlackChannel(opts: SlackOptions): Promise<Channel> {
   console.log('[slack] connected (socket mode)');
 
   return {
-    async send(threadId: string, text: string) {
+    async send(threadId: string, text: string, _opts?: SendOpts) {
+      // _opts.audioPath is silently ignored — Slack file uploads aren't wired yet,
+      // so voice replies fall back to the spoken text.
       if (!threadId.startsWith(PREFIX)) {
         throw new Error(`slack channel cannot send to thread ${threadId}`);
       }

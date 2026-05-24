@@ -4,7 +4,7 @@
 // (Linked devices → Link a device). Auth state is saved to ./data/whatsapp-auth
 // for subsequent runs.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
@@ -17,14 +17,33 @@ import makeWASocket, {
   type WASocket,
 } from 'baileys';
 import type { Boom } from '@hapi/boom';
-import type { Channel, ChannelInit } from './types.ts';
+import type { Channel, ChannelInit, SendOpts } from './types.ts';
+import { transcribe, whisperHealthy } from '../voice.ts';
 
 const PREFIX = 'whatsapp:';
 const AUTH_DIR = process.env.NOTHINGCLAW_WHATSAPP_AUTH ?? 'data/whatsapp-auth';
 const MEDIA_DIR = process.env.NOTHINGCLAW_WHATSAPP_MEDIA ?? 'data/whatsapp-media';
 const VERBOSE = process.env.NOTHINGCLAW_WHATSAPP_VERBOSE === '1';
+const VOICE_ENABLED = process.env.NOTHINGCLAW_VOICE === '1';
 
 const logger = pino({ level: VERBOSE ? 'info' : 'silent' });
+
+async function tryDownloadAudio(msg: WAMessage): Promise<string | null> {
+  if (!msg.message?.audioMessage) return null;
+  try {
+    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+    mkdirSync(MEDIA_DIR, { recursive: true });
+    const mime = msg.message.audioMessage.mimetype ?? 'audio/ogg';
+    const ext = mime.includes('ogg') ? 'ogg' : (mime.split('/').pop() ?? 'audio').split(';')[0];
+    const id = (msg.key.id ?? `${Date.now()}`).replace(/[^a-zA-Z0-9-]/g, '_');
+    const filePath = resolve(MEDIA_DIR, `${id}.${ext}`);
+    writeFileSync(filePath, buffer as Buffer);
+    return filePath;
+  } catch (err) {
+    console.error('[whatsapp] audio download failed:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
 
 async function tryDownloadImage(msg: WAMessage): Promise<string | null> {
   if (!msg.message?.imageMessage) return null;
@@ -121,20 +140,36 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
 
         const baseText = extractText(msg.message);
         const imagePath = await tryDownloadImage(msg);
+        const audioPath = await tryDownloadAudio(msg);
 
-        if (!baseText && !imagePath) {
+        // Transcribe audio if voice support is enabled + whisper sidecar is up.
+        let voiceText = '';
+        if (audioPath && VOICE_ENABLED) {
+          try {
+            const t0 = Date.now();
+            voiceText = await transcribe(audioPath);
+            const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+            console.log(`[whatsapp] transcribed ${audioPath} in ${elapsed}s: ${voiceText.slice(0, 80)}${voiceText.length > 80 ? '…' : ''}`);
+          } catch (err) {
+            console.error('[whatsapp] transcribe failed:', err instanceof Error ? err.message : err);
+            voiceText = '(voice message — transcription failed; ask the user to type)';
+          }
+        } else if (audioPath) {
+          console.log(`[whatsapp] received audio but NOTHINGCLAW_VOICE!=1; skipping transcription`);
+        }
+
+        if (!baseText && !imagePath && !voiceText) {
           const kind = msg.message ? Object.keys(msg.message)[0] : 'empty';
           console.log(`[whatsapp] skipped non-text (${kind}) from ${msg.key.remoteJid}`);
           continue;
         }
 
-        // Build a single text payload. For images, embed the absolute path with
-        // gemini/claude's @<path> file-include syntax so the agent can see them.
-        const fullText = imagePath
-          ? baseText
-            ? `${baseText}\n\n[user attached an image: @${imagePath}]`
-            : `[user attached an image: @${imagePath}]`
-          : baseText;
+        // Assemble the message payload the agent will see.
+        const parts: string[] = [];
+        if (baseText) parts.push(baseText);
+        if (voiceText) parts.push(`[Voice]: ${voiceText}`);
+        if (imagePath) parts.push(`[user attached an image: @${imagePath}]`);
+        const fullText = parts.join('\n\n');
 
         const threadId = `${PREFIX}${msg.key.remoteJid}`;
         const preview = fullText.slice(0, 80);
@@ -151,11 +186,21 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
   }
 
   return {
-    async send(threadId: string, text: string) {
+    async send(threadId: string, text: string, opts?: SendOpts) {
       if (!threadId.startsWith(PREFIX)) {
         throw new Error(`whatsapp channel cannot send to thread ${threadId}`);
       }
       const jid = threadId.slice(PREFIX.length);
+
+      if (opts?.audioPath) {
+        const audio = readFileSync(opts.audioPath);
+        const mimetype = opts.audioPath.endsWith('.mp3') ? 'audio/mpeg' : 'audio/ogg; codecs=opus';
+        const ptt = mimetype.startsWith('audio/ogg'); // only opus is a real voice note
+        console.log(`[whatsapp] out (voice, ${(audio.length/1024).toFixed(1)}KB) ${jid}: ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`);
+        await sock.sendMessage(jid, { audio, mimetype, ptt });
+        return;
+      }
+
       console.log(`[whatsapp] out ${jid}: ${text.slice(0, 80)}${text.length > 80 ? '…' : ''}`);
       await sock.sendMessage(jid, { text });
     },

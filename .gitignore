@@ -9,6 +9,9 @@ node_modules/
 # Runtime / state — contains DB, WhatsApp linked-device auth, downloaded media
 data/
 
+# Voice sidecar — Python venv + Kokoro model (~600MB). Recreated by tools/setup-voice.sh.
+tools/voice-env/
+
 # Agent's long-term memory — contains personal info it has learned about you.
 # A starter file ships as MEMORY.template.md; setup.sh copies it to MEMORY.md.
 MEMORY.md

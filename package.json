@@ -12,6 +12,7 @@
     "status": "bun run src/cli/index.ts status",
     "provider": "bun run src/cli/index.ts provider",
     "whatsapp": "bun run src/cli/index.ts whatsapp",
+    "voice": "bun run src/cli/index.ts voice",
     "dev": "bun run src/cli/index.ts start",
     "mcp": "bun run src/mcp/server.ts",
     "typecheck": "tsc --noEmit"

@@ -13,6 +13,7 @@ export interface OutboxRow {
   id: number;
   thread_id: string;
   text: string;
+  audio_path: string | null;
 }
 
 export function initDb(): Database {
@@ -32,11 +33,18 @@ export function initDb(): Database {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       thread_id TEXT NOT NULL,
       text TEXT NOT NULL,
+      audio_path TEXT,
       delivered_at INTEGER,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS outbox_pending_idx ON outbox(delivered_at, id);
   `);
+
+  // Migration: add audio_path column for pre-Stage-2 databases that don't have it.
+  const cols = db.query('PRAGMA table_info(outbox)').all() as { name: string }[];
+  if (!cols.some((c) => c.name === 'audio_path')) {
+    db.exec('ALTER TABLE outbox ADD COLUMN audio_path TEXT');
+  }
   return db;
 }
 
@@ -53,7 +61,7 @@ export function appendMessage(db: Database, threadId: string, role: 'user' | 'as
 
 export function takePendingOutbox(db: Database, limit = 20): OutboxRow[] {
   return db
-    .query('SELECT id, thread_id, text FROM outbox WHERE delivered_at IS NULL ORDER BY id LIMIT ?')
+    .query('SELECT id, thread_id, text, audio_path FROM outbox WHERE delivered_at IS NULL ORDER BY id LIMIT ?')
     .all(limit) as OutboxRow[];
 }
 
