@@ -174,6 +174,8 @@ export const NOTHINGCLAW_MCP_TOOLS = [
   'mcp__nothingclaw__gmail_recent',
   'mcp__nothingclaw__gmail_search',
   'mcp__nothingclaw__gmail_get',
+  'mcp__nothingclaw__gmail_send',
+  'mcp__nothingclaw__contacts_search',
   'mcp__nothingclaw__calendar_list_events',
   'mcp__nothingclaw__calendar_create_event',
   'mcp__nothingclaw__calendar_raw',

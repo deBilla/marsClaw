@@ -52,6 +52,41 @@ export async function getMessage(id: string, account?: string): Promise<MessageF
   return { ...toMeta(id, msg.data), body: extractBody(msg.data.payload) };
 }
 
+export interface SendOptions {
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+  replyTo?: string;
+}
+
+export async function sendMessage(opts: SendOptions, account?: string): Promise<string> {
+  const g = gmailClient(account);
+  const raw = buildRawMime(opts);
+  const res = await g.users.messages.send({ userId: 'me', requestBody: { raw } });
+  return res.data.id ?? '';
+}
+
+function buildRawMime(opts: SendOptions): string {
+  const headers: string[] = [];
+  headers.push(`To: ${opts.to.join(', ')}`);
+  if (opts.cc?.length) headers.push(`Cc: ${opts.cc.join(', ')}`);
+  if (opts.bcc?.length) headers.push(`Bcc: ${opts.bcc.join(', ')}`);
+  if (opts.replyTo) headers.push(`Reply-To: ${opts.replyTo}`);
+  headers.push(`Subject: ${encodeSubject(opts.subject)}`);
+  headers.push('MIME-Version: 1.0');
+  headers.push('Content-Type: text/plain; charset="UTF-8"');
+  headers.push('Content-Transfer-Encoding: 8bit');
+  const mime = `${headers.join('\r\n')}\r\n\r\n${opts.body}`;
+  return Buffer.from(mime, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function encodeSubject(s: string): string {
+  // RFC 2047 encoded-word for any non-ASCII subject; pass-through otherwise.
+  return /[^\x20-\x7e]/.test(s) ? `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=` : s;
+}
+
 function toMeta(
   id: string,
   data: {

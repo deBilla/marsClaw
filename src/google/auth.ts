@@ -110,6 +110,8 @@ export async function loginInteractive(scopes: string[], alias = 'default'): Pro
     scope: scopes,
   });
 
+  console.log(`Requesting scopes:`);
+  for (const s of scopes) console.log(`  - ${s}`);
   console.log(`Opening browser for Google consent (account: ${alias})...\nIf nothing opens, visit:\n${authUrl}\n`);
   openBrowser(authUrl);
 
@@ -121,7 +123,13 @@ export async function loginInteractive(scopes: string[], alias = 'default'): Pro
     );
   }
   setSecret(`${TOKEN_PREFIX}:${alias}`, tokens.refresh_token);
-  setSecret(`${SCOPES_PREFIX}:${alias}`, scopes.join(' '));
+  // Store the scopes Google ACTUALLY granted, not what we asked for.
+  // Google can issue a token covering a subset (e.g. if the user un-ticks
+  // a checkbox on the consent screen), and we want to surface that
+  // truthfully — otherwise downstream `gmail_send` etc. fail with 403
+  // and `status` claims everything is fine.
+  const granted = (tokens.scope ?? scopes.join(' ')).trim();
+  setSecret(`${SCOPES_PREFIX}:${alias}`, granted);
 
   const idx = readIndex();
   if (!idx.accounts.includes(alias)) idx.accounts.push(alias);
@@ -129,6 +137,14 @@ export async function loginInteractive(scopes: string[], alias = 'default'): Pro
   writeIndex(idx);
 
   console.log(`✓ Stored refresh token for "${alias}" in keychain.`);
+  const grantedSet = new Set(granted.split(/\s+/).filter(Boolean));
+  const missing = scopes.filter((s) => !grantedSet.has(s));
+  if (missing.length) {
+    console.log(`⚠ Google did not grant the following scopes:`);
+    for (const s of missing) console.log(`    - ${s}`);
+    console.log(`  Re-run login and ensure every box is checked on the consent screen,`);
+    console.log(`  or revoke at https://myaccount.google.com/permissions and retry.`);
+  }
   if (idx.default !== alias) {
     console.log(`  (default account is still "${idx.default}"; switch with: nothingclaw google use ${alias})`);
   }

@@ -10,3 +10,4 @@ export const driveClient = (account?: string) => google.drive({ version: 'v3', a
 export const sheetsClient = (account?: string) => google.sheets({ version: 'v4', auth: getAuthedClient(account) });
 export const docsClient = (account?: string) => google.docs({ version: 'v1', auth: getAuthedClient(account) });
 export const slidesClient = (account?: string) => google.slides({ version: 'v1', auth: getAuthedClient(account) });
+export const peopleClient = (account?: string) => google.people({ version: 'v1', auth: getAuthedClient(account) });

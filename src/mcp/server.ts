@@ -4,7 +4,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { sendTool } from './send.ts';
 import { sendFileTool } from './send_file.ts';
 import { speakTool } from './speak.ts';
-import { gmailRecentTool, gmailSearchTool, gmailGetTool } from './gmail.ts';
+import { gmailRecentTool, gmailSearchTool, gmailGetTool, gmailSendTool } from './gmail.ts';
+import { contactsSearchTool } from './contacts.ts';
 import { calendarListTool, calendarCreateTool, calendarRawTool } from './calendar.ts';
 import { driveSearchTool, driveReadTool, driveRawTool } from './drive.ts';
 import { sheetsReadTool, sheetsWriteTool, sheetsRawTool } from './sheets.ts';
@@ -20,6 +21,8 @@ const tools = [
   gmailRecentTool,
   gmailSearchTool,
   gmailGetTool,
+  gmailSendTool,
+  contactsSearchTool,
   calendarListTool,
   calendarCreateTool,
   calendarRawTool,

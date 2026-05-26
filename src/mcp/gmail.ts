@@ -2,7 +2,7 @@
 // src/google/auth.ts — set up once with `bun run google login [alias]`.
 // Every tool accepts an optional `account` (alias from `nothingclaw google list`).
 
-import { listRecent, search, getMessage, type MessageMeta } from '../google/gmail.ts';
+import { listRecent, search, getMessage, sendMessage, type MessageMeta } from '../google/gmail.ts';
 
 function metaLine(m: MessageMeta): string {
   const date = m.date ? ` [${m.date}]` : '';
@@ -116,6 +116,62 @@ export const gmailGetTool = {
     }
   },
 };
+
+export const gmailSendTool = {
+  definition: {
+    name: 'gmail_send',
+    description:
+      'Send an email from the user\'s Gmail. Resolve recipients with contacts_search first if you only have a name. Plain-text body only. Returns the new message id on success.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        to: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Recipient email addresses.',
+        },
+        cc: { type: 'array', items: { type: 'string' }, description: 'CC email addresses.' },
+        bcc: { type: 'array', items: { type: 'string' }, description: 'BCC email addresses.' },
+        subject: { type: 'string', description: 'Subject line.' },
+        body: { type: 'string', description: 'Plain-text body. Use \\n for line breaks.' },
+        reply_to: { type: 'string', description: 'Optional Reply-To address.' },
+        ...accountProp,
+      },
+      required: ['to', 'subject', 'body'],
+    },
+  },
+
+  async handler(args: Record<string, unknown>) {
+    const to = asStringArray(args.to);
+    const cc = asStringArray(args.cc);
+    const bcc = asStringArray(args.bcc);
+    const subject = String(args.subject ?? '').trim();
+    const body = String(args.body ?? '');
+    const replyTo = args.reply_to ? String(args.reply_to) : undefined;
+    const account = args.account ? String(args.account) : undefined;
+    if (to.length === 0) {
+      return { content: [{ type: 'text', text: 'Error: at least one "to" recipient is required' }], isError: true };
+    }
+    if (!subject) {
+      return { content: [{ type: 'text', text: 'Error: subject is required' }], isError: true };
+    }
+    try {
+      const id = await sendMessage(
+        { to, cc: cc.length ? cc : undefined, bcc: bcc.length ? bcc : undefined, subject, body, replyTo },
+        account,
+      );
+      return { content: [{ type: 'text', text: `Sent. Message id: ${id}` }] };
+    } catch (err) {
+      return { content: [{ type: 'text', text: errMsg(err) }], isError: true };
+    }
+  },
+};
+
+function asStringArray(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  if (typeof v === 'string' && v.trim()) return [v.trim()];
+  return [];
+}
 
 function clamp(n: number, lo: number, hi: number): number {
   if (!Number.isFinite(n)) return lo;
