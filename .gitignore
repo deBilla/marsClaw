@@ -1,5 +1,7 @@
 # Dependencies
 node_modules/
+wiki/
+reports/
 
 # Local environment & credentials — NEVER commit
 .env
@@ -15,6 +17,15 @@ tools/voice-env/
 # Agent's long-term memory — contains personal info it has learned about you.
 # A starter file ships as MEMORY.template.md; setup.sh copies it to MEMORY.md.
 MEMORY.md
+
+# Auto-archived conversation transcripts (one .md per compact boundary).
+conversations/
+
+# Crash dumps written by the uncaughtException handler.
+crashes/
+
+# Marker file written when WhatsApp needs a manual QR re-scan.
+data/whatsapp-needs-reauth
 
 # Logs
 *.log

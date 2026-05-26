@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { DB_PATH } from '../db.ts';
+import { DB_PATH } from '../db/connection.ts';
 
 const THREAD_ID = process.env.NOTHINGCLAW_THREAD_ID ?? '';
 

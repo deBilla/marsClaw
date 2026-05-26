@@ -2,6 +2,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
+import { log } from './lib/log.ts';
 
 const WHISPER_URL = process.env.WHISPER_URL ?? 'http://127.0.0.1:9000';
 const KOKORO_URL = process.env.KOKORO_URL ?? 'http://127.0.0.1:9001';
@@ -14,7 +15,9 @@ export async function whisperHealthy(timeoutMs = 2000): Promise<boolean> {
     if (!res.ok) return false;
     const data = (await res.json()) as { ok?: boolean };
     return data.ok === true;
-  } catch {
+  } catch (err) {
+    // Sidecar not running / network unreachable — caller treats as "down".
+    log.debug('whisper health check failed', { err });
     return false;
   }
 }
@@ -25,7 +28,8 @@ export async function kokoroHealthy(timeoutMs = 2000): Promise<boolean> {
     if (!res.ok) return false;
     const data = (await res.json()) as { ok?: boolean };
     return data.ok === true;
-  } catch {
+  } catch (err) {
+    log.debug('kokoro health check failed', { err });
     return false;
   }
 }

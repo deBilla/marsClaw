@@ -4,8 +4,8 @@
 // (Linked devices → Link a device). Auth state is saved to ./data/whatsapp-auth
 // for subsequent runs.
 
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync, readFileSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import makeWASocket, {
@@ -18,15 +18,29 @@ import makeWASocket, {
 } from 'baileys';
 import type { Boom } from '@hapi/boom';
 import type { Channel, ChannelInit, SendOpts } from './types.ts';
-import { transcribe, whisperHealthy } from '../voice.ts';
+import { transcribe } from '../voice.ts';
+import { log } from '../lib/log.ts';
+import { loadConfig } from '../lib/config.ts';
+import { isSafeAttachmentName } from '../lib/attachment-safety.ts';
+import { gateCommand } from '../lib/command-gate.ts';
+import { RateLimiter } from '../lib/rate-limit.ts';
+import { interruptThread } from '../providers/claude-sdk.ts';
+
+const STOP_RE = /^\s*(stop|abort|cancel|wait\s+stop|nvm|nevermind|never\s+mind)\s*[!.\s]*$/i;
 
 const PREFIX = 'whatsapp:';
 const AUTH_DIR = process.env.NOTHINGCLAW_WHATSAPP_AUTH ?? 'data/whatsapp-auth';
 const MEDIA_DIR = process.env.NOTHINGCLAW_WHATSAPP_MEDIA ?? 'data/whatsapp-media';
 const VERBOSE = process.env.NOTHINGCLAW_WHATSAPP_VERBOSE === '1';
-const VOICE_ENABLED = process.env.NOTHINGCLAW_VOICE === '1';
+// Marker file written when the session is logged out and the user must
+// re-scan the QR. Cleared on successful reconnect. External monitors
+// (the health endpoint, a phone widget, a cron-driven email script) can
+// watch this file to alert the operator.
+const REAUTH_MARKER = process.env.NOTHINGCLAW_WHATSAPP_REAUTH_MARKER ?? 'data/whatsapp-needs-reauth';
 
-const logger = pino({ level: VERBOSE ? 'info' : 'silent' });
+// pino is used ONLY to silence Baileys' chatty internal logger. Our own
+// logging goes through src/lib/log.ts.
+const baileysLogger = pino({ level: VERBOSE ? 'info' : 'silent' });
 
 async function tryDownloadAudio(msg: WAMessage): Promise<string | null> {
   if (!msg.message?.audioMessage) return null;
@@ -40,7 +54,7 @@ async function tryDownloadAudio(msg: WAMessage): Promise<string | null> {
     writeFileSync(filePath, buffer as Buffer);
     return filePath;
   } catch (err) {
-    console.error('[whatsapp] audio download failed:', err instanceof Error ? err.message : err);
+    log.warn('whatsapp audio download failed', { err });
     return null;
   }
 }
@@ -57,7 +71,7 @@ async function tryDownloadImage(msg: WAMessage): Promise<string | null> {
     writeFileSync(filePath, buffer as Buffer);
     return filePath;
   } catch (err) {
-    console.error('[whatsapp] image download failed:', err instanceof Error ? err.message : err);
+    log.warn('whatsapp image download failed', { err });
     return null;
   }
 }
@@ -69,15 +83,23 @@ async function tryDownloadDocument(msg: WAMessage): Promise<{ path: string; file
     const buffer = await downloadMediaMessage(msg, 'buffer', {});
     mkdirSync(MEDIA_DIR, { recursive: true });
     const id = (msg.key.id ?? `${Date.now()}`).replace(/[^a-zA-Z0-9-]/g, '_');
-    const original = (doc.fileName ?? '').replace(/[^a-zA-Z0-9._-]/g, '_');
+    // Sanitize the inbound filename. Even after isSafeAttachmentName, we
+    // sanitise non-alphanum chars for cosmetic safety, but only AFTER the
+    // safety predicate has cleared traversal sequences.
+    const rawFileName = doc.fileName ?? '';
+    const safeName = isSafeAttachmentName(rawFileName) ? rawFileName : '';
+    if (rawFileName && !safeName) {
+      log.warn('whatsapp document had unsafe filename — using mime-derived fallback', { rawFileName });
+    }
+    const sanitised = safeName.replace(/[^a-zA-Z0-9._-]/g, '_');
     const mime = doc.mimetype ?? 'application/octet-stream';
     const mimeExt = (mime.split('/').pop() ?? 'bin').split(';')[0];
-    const ext = original.includes('.') ? original.split('.').pop()! : mimeExt;
+    const ext = sanitised.includes('.') ? sanitised.split('.').pop()! : mimeExt;
     const filePath = resolve(MEDIA_DIR, `${id}.${ext}`);
     writeFileSync(filePath, buffer as Buffer);
-    return { path: filePath, fileName: original || `document.${ext}` };
+    return { path: filePath, fileName: sanitised || `document.${ext}` };
   } catch (err) {
-    console.error('[whatsapp] document download failed:', err instanceof Error ? err.message : err);
+    log.warn('whatsapp document download failed', { err });
     return null;
   }
 }
@@ -100,23 +122,39 @@ function extractText(m: WAMessageContent | null | undefined): string {
 
 export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel> {
   mkdirSync(AUTH_DIR, { recursive: true });
+  const config = loadConfig();
+  const allowedJids = new Set(config.allowed_jids);
+  const voiceEnabled = config.voice_enabled;
+  const limiter =
+    config.rate_limit_per_minute > 0 || config.rate_limit_per_hour > 0
+      ? new RateLimiter({
+          perMinute: config.rate_limit_per_minute || Infinity,
+          perHour: config.rate_limit_per_hour || Infinity,
+        })
+      : null;
   let sock: WASocket = await connect(opts);
   let consecutiveFailures = 0;
 
   async function connect(opts: ChannelInit): Promise<WASocket> {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const s = makeWASocket({ auth: state, logger });
+    const s = makeWASocket({ auth: state, logger: baileysLogger });
 
     s.ev.on('creds.update', saveCreds);
 
     s.ev.on('connection.update', (u) => {
       if (u.qr) {
-        console.log('\n[whatsapp] scan this QR with your phone (Settings → Linked devices → Link a device):\n');
+        log.info('whatsapp QR code — scan from your phone (Settings → Linked devices → Link a device)');
         qrcode.generate(u.qr, { small: true });
       }
       if (u.connection === 'open') {
         consecutiveFailures = 0;
-        console.log('[whatsapp] connected');
+        // Successful reconnect — clear any stale re-auth marker.
+        try {
+          if (existsSync(REAUTH_MARKER)) unlinkSync(REAUTH_MARKER);
+        } catch (err) {
+          log.debug('failed to clear reauth marker', { err });
+        }
+        log.info('whatsapp connected');
       }
       if (u.connection === 'close') {
         const code = (u.lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
@@ -124,19 +162,35 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
         consecutiveFailures++;
 
         if (loggedOut) {
-          console.log('[whatsapp] logged out — delete data/whatsapp-auth/ and re-run to re-link');
+          // Persist a marker file so external monitors / a phone widget /
+          // a cron-driven email can alert the operator. Without this the
+          // session being dead is invisible until you message yourself
+          // and notice no reply.
+          try {
+            writeFileSync(
+              REAUTH_MARKER,
+              `WhatsApp logged out at ${new Date().toISOString()}.\n` +
+                `To re-link:\n  1. Delete ${AUTH_DIR}/\n  2. Restart the bot (bun run start)\n  3. Scan the QR shown in terminal\n`,
+            );
+          } catch (err) {
+            log.debug('failed to write reauth marker', { err });
+          }
+          log.warn(
+            '⚠️  whatsapp logged out — manual re-link required',
+            { marker: REAUTH_MARKER, fix: `delete ${AUTH_DIR}/ and restart` },
+          );
           return;
         }
 
         if (consecutiveFailures >= 5) {
-          console.error('[whatsapp] giving up after 5 failed connection attempts.');
-          console.error('  - too many linked devices on your account (max 4)');
-          console.error('  - WhatsApp blocked the link from this IP / region');
-          console.error(`  - last status code: ${code}`);
+          log.error('whatsapp giving up after 5 failed connection attempts', {
+            code,
+            hints: 'too many linked devices (max 4) / blocked link / IP region',
+          });
           return;
         }
 
-        console.log(`[whatsapp] disconnected (code=${code}, reconnecting #${consecutiveFailures})`);
+        log.warn('whatsapp disconnected — reconnecting', { code, attempt: consecutiveFailures });
         setTimeout(async () => {
           sock = await connect(opts);
         }, 2000);
@@ -147,7 +201,7 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
       // 'notify' = live new message. 'append' = history sync after pairing —
       // do NOT auto-reply to those, they're things the user already sent/received.
       if (type !== 'notify') {
-        if (VERBOSE) console.log(`[whatsapp] ignored ${messages.length} ${type} message(s)`);
+        if (VERBOSE) log.debug('whatsapp ignored non-notify batch', { count: messages.length, type });
         return;
       }
       for (const msg of messages) {
@@ -158,30 +212,80 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
         // skip status broadcasts
         if (msg.key.remoteJid === 'status@broadcast') continue;
 
+        // Sender allow-list. Empty set = accept all (warned at boot).
+        if (allowedJids.size > 0 && !allowedJids.has(msg.key.remoteJid)) {
+          log.warn('whatsapp rejected — sender not in allow-list', { jid: msg.key.remoteJid });
+          continue;
+        }
+
+        // Per-sender rate limit. Silently drop excess messages so we don't
+        // turn a flood into a flood of explanatory replies.
+        if (limiter) {
+          const verdict = limiter.check(msg.key.remoteJid);
+          if (!verdict.ok) {
+            log.warn('whatsapp rate-limited', {
+              jid: msg.key.remoteJid,
+              reason: verdict.reason,
+              retryAfterMs: verdict.retryAfterMs,
+            });
+            continue;
+          }
+        }
+
         const baseText = extractText(msg.message);
+
+        // User-initiated interrupt. Single-word "stop" / "abort" / "cancel"
+        // (case-insensitive, trailing punctuation tolerated) tears down the
+        // in-flight session WITHOUT queueing behind it. The agent loop
+        // currently serialises per-thread, so without this, "stop" would
+        // wait for the very turn it's trying to halt.
+        if (baseText && STOP_RE.test(baseText)) {
+          const threadId = `${PREFIX}${msg.key.remoteJid}`;
+          const interrupted = interruptThread(threadId);
+          const reply = interrupted ? 'Stopped.' : 'Nothing in progress.';
+          log.info('whatsapp interrupt', { jid: msg.key.remoteJid, interrupted });
+          try {
+            await sock.sendMessage(msg.key.remoteJid, { text: reply });
+          } catch (err) {
+            log.warn('whatsapp interrupt-ack send failed', { err });
+          }
+          continue;
+        }
+
         const imagePath = await tryDownloadImage(msg);
         const audioPath = await tryDownloadAudio(msg);
         const document = await tryDownloadDocument(msg);
 
+        // Drop slash-commands meant for interactive CLIs (`/help`, `/clear`)
+        // before they reach the agent.
+        if (baseText && gateCommand(baseText) === 'filter') {
+          log.debug('whatsapp filtered slash-command', { jid: msg.key.remoteJid, cmd: baseText.split(/\s/)[0] });
+          continue;
+        }
+
         // Transcribe audio if voice support is enabled + whisper sidecar is up.
         let voiceText = '';
-        if (audioPath && VOICE_ENABLED) {
+        if (audioPath && voiceEnabled) {
           try {
             const t0 = Date.now();
             voiceText = await transcribe(audioPath);
             const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-            console.log(`[whatsapp] transcribed ${audioPath} in ${elapsed}s: ${voiceText.slice(0, 80)}${voiceText.length > 80 ? '…' : ''}`);
+            log.info('whatsapp transcribed audio', {
+              path: audioPath,
+              elapsed,
+              preview: voiceText.slice(0, 80),
+            });
           } catch (err) {
-            console.error('[whatsapp] transcribe failed:', err instanceof Error ? err.message : err);
+            log.warn('whatsapp transcribe failed', { err });
             voiceText = '(voice message — transcription failed; ask the user to type)';
           }
         } else if (audioPath) {
-          console.log(`[whatsapp] received audio but NOTHINGCLAW_VOICE!=1; skipping transcription`);
+          log.debug('whatsapp audio received but voice disabled');
         }
 
         if (!baseText && !imagePath && !voiceText && !document) {
           const kind = msg.message ? Object.keys(msg.message)[0] : 'empty';
-          console.log(`[whatsapp] skipped non-text (${kind}) from ${msg.key.remoteJid}`);
+          log.debug('whatsapp skipped non-text', { jid: msg.key.remoteJid, kind });
           continue;
         }
 
@@ -194,12 +298,11 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
         const fullText = parts.join('\n\n');
 
         const threadId = `${PREFIX}${msg.key.remoteJid}`;
-        const preview = fullText.slice(0, 80);
-        console.log(`[whatsapp] in  ${msg.key.remoteJid}: ${preview}${fullText.length > 80 ? '…' : ''}`);
+        log.info('whatsapp in', { jid: msg.key.remoteJid, preview: fullText.slice(0, 80) });
         try {
           await opts.onMessage(threadId, fullText);
         } catch (err) {
-          console.error('[whatsapp] handler error', err);
+          log.error('whatsapp handler error', { jid: msg.key.remoteJid, err });
         }
       }
     });
@@ -218,13 +321,63 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
         const audio = readFileSync(opts.audioPath);
         const mimetype = opts.audioPath.endsWith('.mp3') ? 'audio/mpeg' : 'audio/ogg; codecs=opus';
         const ptt = mimetype.startsWith('audio/ogg'); // only opus is a real voice note
-        console.log(`[whatsapp] out (voice, ${(audio.length/1024).toFixed(1)}KB) ${jid}: ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`);
+        log.info('whatsapp out (voice)', {
+          jid,
+          bytes: audio.length,
+          preview: text.slice(0, 60),
+        });
         await sock.sendMessage(jid, { audio, mimetype, ptt });
         return;
       }
 
-      console.log(`[whatsapp] out ${jid}: ${text.slice(0, 80)}${text.length > 80 ? '…' : ''}`);
+      if (opts?.filePath) {
+        const buf = readFileSync(opts.filePath);
+        const lower = opts.filePath.toLowerCase();
+        const displayName = opts.fileName ?? basename(opts.filePath);
+        log.info('whatsapp out (file)', { jid, bytes: buf.length, file: displayName });
+        // Pick the WhatsApp message kind from extension. Images and videos
+        // render inline; everything else goes as a document attachment.
+        if (/\.(jpe?g|png|gif|webp|bmp)$/.test(lower)) {
+          await sock.sendMessage(jid, { image: buf, caption: text || undefined });
+        } else if (/\.(mp4|mov|webm|m4v)$/.test(lower)) {
+          await sock.sendMessage(jid, { video: buf, caption: text || undefined });
+        } else {
+          const mimetype = mimeFromExtension(lower);
+          await sock.sendMessage(jid, {
+            document: buf,
+            mimetype,
+            fileName: displayName,
+            caption: text || undefined,
+          });
+        }
+        return;
+      }
+
+      log.info('whatsapp out', { jid, preview: text.slice(0, 80) });
       await sock.sendMessage(jid, { text });
     },
+
+    async setTyping(threadId: string) {
+      if (!threadId.startsWith(PREFIX)) return;
+      const jid = threadId.slice(PREFIX.length);
+      try {
+        await sock.sendPresenceUpdate('composing', jid);
+      } catch (err) {
+        // Presence updates fail silently on transient socket issues;
+        // typing is a UX nicety, not a correctness signal.
+        log.debug('whatsapp setTyping failed', { jid, err });
+      }
+    },
   };
+}
+
+function mimeFromExtension(lower: string): string {
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.md') || lower.endsWith('.txt')) return 'text/plain';
+  if (lower.endsWith('.csv')) return 'text/csv';
+  if (lower.endsWith('.json')) return 'application/json';
+  if (lower.endsWith('.zip')) return 'application/zip';
+  if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (lower.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  return 'application/octet-stream';
 }

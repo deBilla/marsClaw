@@ -46,7 +46,17 @@ const warn = (s: string) => console.log(`\x1b[33m!\x1b[0m ${s}`);
 const fail = (s: string) => console.error(`\x1b[31m✗\x1b[0m ${s}`);
 
 function isPidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  // `kill -0` is the standard liveness probe — ESRCH means dead, EPERM
+  // means alive-but-not-ours. We treat any throw as dead because the only
+  // case where the PID file exists but the process isn't ours is a PID reuse,
+  // which is rare on macOS and at worst causes a "restart" no-op.
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    void err;
+    return false;
+  }
 }
 
 function readPid(pidFile: string): number | null {

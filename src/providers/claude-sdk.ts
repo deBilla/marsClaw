@@ -8,6 +8,9 @@
 // Session continuity: the SDK still persists the transcript to ~/.claude,
 // so if a session is recycled (idle timeout / crash), the next message
 // resumes from the stored `session_id`.
+//
+// Capacity: sessions are kept in an LRU map capped at config.max_sessions.
+// A flood of new threads (e.g. a spam bot) cannot OOM the host.
 
 import type { Database } from 'bun:sqlite';
 import {
@@ -16,28 +19,100 @@ import {
   type Query,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { getThreadSession, setThreadSession, clearThreadSession } from '../db.ts';
+import { getThreadSession, setThreadSession, clearThreadSession } from '../db/sessions.ts';
+import { log } from '../lib/log.ts';
+import { loadConfig } from '../lib/config.ts';
+import { touchHeartbeat } from '../lib/heartbeat.ts';
+import { buildCanUseTool, NOTHINGCLAW_MCP_TOOLS } from '../lib/tool-permissions.ts';
+import { archiveConversation } from '../lib/conversation-archive.ts';
+import { isOverBudget, recordUsage, todaySpendUsd } from '../lib/cost-tracker.ts';
+import { isUsingMeteredApi } from './claude.ts';
+import { ClaudeHardError, classifyHardError, isTransientError, userFriendlyError } from './claude-error.ts';
 
 const PROVIDER_NAME = 'claude';
+const config = loadConfig();
+const BOT_NAME = config.bot_name;
+const IDLE_MS = config.idle_ms;
+const MAX_SESSIONS = config.max_sessions;
+const canUseTool = buildCanUseTool(config);
 
-// How long a session can sit idle before we tear down the subprocess. Next
-// message after this will pay cold-start again but resume the transcript.
-const IDLE_MS = Number(process.env.NOTHINGCLAW_CLAUDE_IDLE_MS ?? 15 * 60_000);
+// Chat-mode override on top of the `claude_code` preset. Stops the harness
+// reminders (TodoWrite, etc.) from leaking into user-facing replies, and
+// gives the assistant a stable identity.
+const CHAT_PERSONA_APPEND = `You are ${BOT_NAME}, a personal chat assistant living in a messaging app.
+
+Your stdout is sent to the user verbatim as one chat message. Reply directly, conversationally, and briefly — usually one or two sentences.
+
+You are NOT in a coding session. Ignore any <system-reminder> messages about TodoWrite, planning, or other internal harness affordances — those are environment noise, never relevant to the user, and must never appear in your reply.
+
+When referring to yourself, say "${BOT_NAME}" (never "Claude" or "the assistant").`;
+
+// Tools the chat persona shouldn't see. TodoWrite is the main offender (it
+// triggers harness reminders); the rest are Claude Code UI affordances that
+// only make sense in an interactive IDE.
+const DISALLOWED_TOOLS = [
+  'TodoWrite',
+  'ScheduleWakeup',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'EnterWorktree',
+  'ExitWorktree',
+];
 
 // SDK errors when `resume: <id>` points at a missing JSONL (purged, different
 // machine). Retry once with a fresh session.
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+// Explicit whitelist of env vars handed to the MCP child. Everything else
+// — including ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, and any other
+// secrets in process.env — stays in this parent process. The MCP child
+// only handles Google APIs (via OAuth tokens stored in Keychain) and the
+// outbox DB; it has no business knowing the Anthropic credentials.
+const MCP_ENV_PASSTHROUGH = [
+  'PATH',
+  'HOME',
+  'USER',
+  'SHELL',
+  'TZ',
+  'LANG',
+  'LC_ALL',
+  // Logging
+  'LOG_LEVEL',
+  // App config the MCP server consults
+  'NOTHINGCLAW_DB',
+  'NOTHINGCLAW_CONFIG',
+  'NOTHINGCLAW_VOICE_OUT',
+  'NOTHINGCLAW_HEARTBEAT',
+  // Google OAuth — needed by gmail/drive/etc tools. Refresh tokens live in
+  // macOS Keychain, NOT in env; only the client id + secret pair comes
+  // through here.
+  'GOOGLE_OAUTH_CLIENT_ID',
+  'GOOGLE_OAUTH_CLIENT_SECRET',
+  // Kokoro TTS for the speak tool
+  'KOKORO_URL',
+  'KOKORO_VOICE',
+  'KOKORO_FORMAT',
+];
+
+function buildMcpChildEnv(threadId: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of MCP_ENV_PASSTHROUGH) {
+    const v = process.env[key];
+    if (v !== undefined) env[key] = v;
+  }
+  env.NOTHINGCLAW_THREAD_ID = threadId;
+  return env;
+}
+
 function mcpServers(threadId: string): Record<string, McpServerConfig> {
   return {
     nothingclaw: {
       type: 'stdio',
-      command: 'bun',
+      // Use the same bun binary that's running the parent. Relying on PATH
+      // lookup breaks under launchd, whose PATH won't include nvm/asdf dirs.
+      command: process.execPath,
       args: ['run', 'src/mcp/server.ts'],
-      env: {
-        ...(process.env as Record<string, string>),
-        NOTHINGCLAW_THREAD_ID: threadId,
-      },
+      env: buildMcpChildEnv(threadId),
     },
   };
 }
@@ -68,7 +143,9 @@ class MessageStream implements AsyncIterable<SDKUserMessage> {
     while (true) {
       while (this.queue.length > 0) yield this.queue.shift()!;
       if (this.done) return;
-      await new Promise<void>((r) => { this.waiting = r; });
+      await new Promise<void>((r) => {
+        this.waiting = r;
+      });
       this.waiting = null;
     }
   }
@@ -83,20 +160,39 @@ class ClaudeSession {
   private stream = new MessageStream();
   private query: Query;
   private currentTurn: Turn | null = null;
+  private turnStartedAt: number | null = null;
   private sessionId: string | null;
   private destroyed = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(public readonly threadId: string, resumeId: string | null) {
+  constructor(
+    public readonly threadId: string,
+    resumeId: string | null,
+    private readonly db: Database,
+  ) {
     this.sessionId = resumeId;
     this.query = sdkQuery({
       prompt: this.stream,
       options: {
         cwd: process.cwd(),
         resume: resumeId ?? undefined,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
+        // 'default' + canUseTool callback instead of bypassPermissions.
+        // The callback gates filesystem-touching tools by allowed_paths
+        // and adds a destructive-Bash blocklist. See src/lib/tool-permissions.ts.
+        permissionMode: 'default',
+        canUseTool,
+        // Pre-allow our own MCP tools so they bypass the prompt flow entirely.
+        // (canUseTool also returns allow for any `mcp__*` tool, but the SDK
+        // in `default` mode sometimes routes MCP calls differently from
+        // built-in tools — listing them here is the belt-and-braces path.)
+        allowedTools: NOTHINGCLAW_MCP_TOOLS,
         settingSources: ['project', 'user'],
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+          append: CHAT_PERSONA_APPEND,
+        },
+        disallowedTools: DISALLOWED_TOOLS,
         mcpServers: mcpServers(threadId),
       },
     });
@@ -106,10 +202,49 @@ class ClaudeSession {
   private async consume(): Promise<void> {
     try {
       for await (const msg of this.query) {
+        // Any inbound SDK message proves the session is alive — useful for
+        // host-side stuck detection.
+        touchHeartbeat();
         if (msg.type === 'system' && msg.subtype === 'init') {
           this.sessionId = msg.session_id ?? this.sessionId;
+        } else if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+          // SDK just compacted context. Snapshot the human-readable history
+          // to conversations/ before pre-compact detail becomes lossy.
+          archiveConversation(this.db, this.threadId, {
+            trigger: msg.compact_metadata?.trigger,
+            pre_tokens: msg.compact_metadata?.pre_tokens,
+            post_tokens: msg.compact_metadata?.post_tokens,
+            duration_ms: msg.compact_metadata?.duration_ms,
+          });
         } else if (msg.type === 'result') {
           this.sessionId = msg.session_id ?? this.sessionId;
+          if (msg.subtype === 'success') {
+            // Record per-turn cost. The SDK gives us total_cost_usd and a
+            // usage block straight from the Anthropic API — no estimation.
+            try {
+              const usage = msg.usage as
+                | {
+                    input_tokens?: number;
+                    output_tokens?: number;
+                    cache_read_input_tokens?: number;
+                    cache_creation_input_tokens?: number;
+                  }
+                | undefined;
+              recordUsage({
+                at: new Date().toISOString(),
+                thread: this.threadId,
+                provider: 'claude',
+                inputTokens: usage?.input_tokens ?? 0,
+                outputTokens: usage?.output_tokens ?? 0,
+                cacheReadTokens: usage?.cache_read_input_tokens,
+                cacheCreateTokens: usage?.cache_creation_input_tokens,
+                costUsd: msg.total_cost_usd ?? 0,
+                durationMs: msg.duration_ms ?? 0,
+              });
+            } catch (err) {
+              log.warn('usage recording failed', { err });
+            }
+          }
           const turn = this.currentTurn;
           this.currentTurn = null;
           if (!turn) continue;
@@ -131,8 +266,13 @@ class ClaudeSession {
     }
   }
 
-  isDead(): boolean { return this.destroyed; }
-  getSessionId(): string | null { return this.sessionId; }
+  isDead(): boolean {
+    return this.destroyed;
+  }
+
+  getSessionId(): string | null {
+    return this.sessionId;
+  }
 
   send(userText: string, timeoutMs: number): Promise<string> {
     if (this.destroyed) return Promise.reject(new Error('session destroyed'));
@@ -143,18 +283,34 @@ class ClaudeSession {
         if (this.currentTurn) {
           const t = this.currentTurn;
           this.currentTurn = null;
+          this.turnStartedAt = null;
           this.destroy('turn timeout');
           t.reject(new Error('turn timed out'));
         }
       }, timeoutMs);
 
+      this.turnStartedAt = Date.now();
       this.currentTurn = {
-        resolve: (text) => { clearTimeout(timer); this.armIdleTimer(); resolve(text); },
-        reject: (err) => { clearTimeout(timer); reject(err); },
+        resolve: (text) => {
+          clearTimeout(timer);
+          this.turnStartedAt = null;
+          this.armIdleTimer();
+          resolve(text);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          this.turnStartedAt = null;
+          reject(err);
+        },
       };
 
       this.stream.push(userText);
     });
+  }
+
+  /** Epoch-ms when the current turn was claimed, or null if idle. */
+  getTurnStartedAt(): number | null {
+    return this.turnStartedAt;
   }
 
   armIdleTimer(): void {
@@ -165,35 +321,133 @@ class ClaudeSession {
   destroy(reason: string): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
-    console.log(`[claude] tearing down session ${this.threadId} (${reason})`);
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    log.info('claude session torn down', { thread: this.threadId, reason });
     this.stream.end();
     // Best-effort interrupt — query() may not have an explicit close.
-    try { void this.query.interrupt?.(); } catch { /* ignore */ }
+    // The optional chain handles missing methods; the catch handles a thrown
+    // interrupt (e.g. SDK rejects "already interrupted").
+    try {
+      void this.query.interrupt?.();
+    } catch (err) {
+      log.debug('claude interrupt threw — non-fatal', { err });
+    }
   }
 }
 
+// LRU map keyed by threadId. Most-recently-used is at the END of the iteration
+// order; eviction pops from the FRONT. JS Map's insertion-ordered iteration
+// makes this trivial: on access, delete + re-set to move to the tail.
 const sessions = new Map<string, ClaudeSession>();
+
+function touchLru(threadId: string, session: ClaudeSession): void {
+  sessions.delete(threadId);
+  sessions.set(threadId, session);
+}
+
+function evictLruIfFull(): void {
+  while (sessions.size >= MAX_SESSIONS) {
+    const oldestKey = sessions.keys().next().value;
+    if (oldestKey === undefined) break;
+    const evicted = sessions.get(oldestKey);
+    sessions.delete(oldestKey);
+    evicted?.destroy('lru evict');
+  }
+}
 
 function shutdown(): void {
   for (const s of sessions.values()) s.destroy('process shutdown');
   sessions.clear();
+  if (sweepTimer) clearInterval(sweepTimer);
+}
+
+/**
+ * Tear down an in-flight session, if any. Returns true if a session was
+ * found and destroyed; false if there's nothing in flight for this thread.
+ * Called by the user-initiated "stop" path in the channel adapter.
+ */
+export function interruptThread(threadId: string): boolean {
+  const session = sessions.get(threadId);
+  if (!session || session.isDead()) return false;
+  session.destroy('user interrupt');
+  sessions.delete(threadId);
+  return true;
 }
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 
-function userFriendlyError(msg: string): string | null {
-  if (/QUOTA_EXHAUSTED|exhausted your capacity|quota will reset/i.test(msg)) {
-    return `I've hit my daily API quota. Try again later or switch providers.`;
+const RETRY_DELAY_MS = 2000;
+
+// --- Stuck-session sweep --------------------------------------------------
+//
+// Backstop for the in-session turn timeout. If the in-session setTimeout
+// somehow doesn't fire (clock jump, process pause, SDK quirk), the sweep
+// catches it. Two checks per session with an active turn:
+//   1. Absolute ceiling: turn age > AGENT_TIMEOUT_MS * 1.5 → kill.
+//   2. Heartbeat-based: turn age > 60s AND heartbeat hasn't been touched
+//      for > 60s → kill (no signs of life).
+import { statSync } from 'node:fs';
+
+const SWEEP_INTERVAL_MS = 30_000;
+const HEARTBEAT_PATH = process.env.NOTHINGCLAW_HEARTBEAT ?? 'data/heartbeat';
+const AGENT_TIMEOUT_MS = Number(process.env.NOTHINGCLAW_AGENT_TIMEOUT_MS ?? 300_000);
+const ABSOLUTE_TURN_CEILING_MS = AGENT_TIMEOUT_MS + 60_000;
+const CLAIM_HEARTBEAT_STALE_MS = 60_000;
+
+function heartbeatAgeMs(now: number): number {
+  try {
+    const st = statSync(HEARTBEAT_PATH);
+    return Math.max(0, now - st.mtimeMs);
+  } catch (err) {
+    void err;
+    return Infinity;
   }
-  if (/rate.?limit|RATE_LIMIT|429.*temporarily/i.test(msg)) {
-    return `I'm being rate-limited. Try again in a minute.`;
-  }
-  if (/unauthorized|UNAUTHENTICATED|invalid.*token|expired|authentication_failed/i.test(msg)) {
-    return `My API auth expired. Re-run setup or refresh the credentials.`;
-  }
-  return null;
 }
+
+export function sweepStuckSessions(now: number = Date.now()): void {
+  const hbAge = heartbeatAgeMs(now);
+  for (const [threadId, session] of sessions) {
+    if (session.isDead()) {
+      sessions.delete(threadId);
+      continue;
+    }
+    const startedAt = session.getTurnStartedAt();
+    if (startedAt === null) continue;
+    const turnAge = now - startedAt;
+    if (turnAge > ABSOLUTE_TURN_CEILING_MS) {
+      log.warn('sweep: killing session past absolute turn ceiling', {
+        thread: threadId,
+        turnAgeMs: turnAge,
+        ceilingMs: ABSOLUTE_TURN_CEILING_MS,
+      });
+      session.destroy('sweep: absolute ceiling');
+      sessions.delete(threadId);
+      continue;
+    }
+    if (turnAge > CLAIM_HEARTBEAT_STALE_MS && hbAge > CLAIM_HEARTBEAT_STALE_MS) {
+      log.warn('sweep: killing session with stale heartbeat', {
+        thread: threadId,
+        turnAgeMs: turnAge,
+        heartbeatAgeMs: hbAge,
+      });
+      session.destroy('sweep: stale heartbeat');
+      sessions.delete(threadId);
+    }
+  }
+}
+
+const sweepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+  try {
+    sweepStuckSessions();
+  } catch (err) {
+    log.warn('session sweep threw', { err });
+  }
+}, SWEEP_INTERVAL_MS);
+// Don't keep the event loop alive just for the sweeper.
+sweepTimer.unref?.();
 
 export async function runClaudeSdk(
   db: Database,
@@ -201,7 +455,33 @@ export async function runClaudeSdk(
   userText: string,
   timeoutMs: number,
 ): Promise<string> {
+  return runClaudeSdkInner(db, threadId, userText, timeoutMs, 0);
+}
+
+async function runClaudeSdkInner(
+  db: Database,
+  threadId: string,
+  userText: string,
+  timeoutMs: number,
+  retryDepth: number,
+): Promise<string> {
   const t0 = Date.now();
+  touchHeartbeat();
+
+  // Daily spend cap. Only enforced when running on the metered API
+  // (ANTHROPIC_API_KEY). Under a Claude Pro/Max subscription via OAuth,
+  // total_cost_usd from the SDK is informational only — no per-token
+  // billing happens — so enforcing the cap would be both meaningless and
+  // disruptive. Usage is still logged in both modes for visibility.
+  if (isUsingMeteredApi() && isOverBudget(config.daily_usd_budget)) {
+    const spent = todaySpendUsd();
+    log.warn('over daily budget — refusing turn', {
+      thread: threadId,
+      spent_usd: spent.toFixed(4),
+      budget_usd: config.daily_usd_budget,
+    });
+    return `I've hit today's spending cap ($${config.daily_usd_budget.toFixed(2)}) — already spent $${spent.toFixed(2)}. Resets at midnight. Raise it via data/config.json daily_usd_budget if needed.`;
+  }
 
   let session = sessions.get(threadId);
   if (session && session.isDead()) {
@@ -210,12 +490,18 @@ export async function runClaudeSdk(
   }
   const isNew = !session;
   if (!session) {
+    evictLruIfFull();
     const prior = getThreadSession(db, threadId, PROVIDER_NAME);
-    session = new ClaudeSession(threadId, prior);
+    session = new ClaudeSession(threadId, prior, db);
     sessions.set(threadId, session);
-    console.log(`[claude] start  ${threadId}${prior ? `  (resume ${prior.slice(0, 8)}…)` : ''}`);
+    log.info('claude session start', {
+      thread: threadId,
+      resume: prior ? prior.slice(0, 8) : null,
+      activeSessions: sessions.size,
+    });
   } else {
-    console.log(`[claude] turn   ${threadId}`);
+    touchLru(threadId, session);
+    log.info('claude turn', { thread: threadId });
   }
 
   try {
@@ -223,7 +509,8 @@ export async function runClaudeSdk(
     const sid = session.getSessionId();
     if (sid) setThreadSession(db, threadId, PROVIDER_NAME, sid);
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`[claude] end    ${threadId}  ${elapsed}s  ${text.length} chars`);
+    log.info('claude turn end', { thread: threadId, elapsed, chars: text.length });
+    touchHeartbeat();
     return text;
   } catch (err) {
     sessions.delete(threadId);
@@ -235,12 +522,26 @@ export async function runClaudeSdk(
     // First-message stale-session: clear the stored id and retry with a
     // fresh process so the user still gets a reply.
     if (isNew && STALE_SESSION_RE.test(msg)) {
-      console.log(`[claude] stale session — clearing and retrying ${threadId}`);
+      log.info('claude stale session — clearing and retrying', { thread: threadId });
       clearThreadSession(db, threadId);
-      return runClaudeSdk(db, threadId, userText, timeoutMs);
+      return runClaudeSdkInner(db, threadId, userText, timeoutMs, retryDepth);
     }
 
-    console.error(`[claude] error ${threadId}  ${elapsed}s  ${msg}`);
-    return userFriendlyError(msg) ?? '';
+    // Transient error: rate-limit, 5xx, socket reset, etc. Retry once with
+    // a fresh session — the SDK's internal state may be poisoned mid-turn.
+    if (retryDepth < 1 && isTransientError(msg)) {
+      log.warn('claude transient error — retrying once', { thread: threadId, elapsed, err: msg });
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      return runClaudeSdkInner(db, threadId, userText, timeoutMs, retryDepth + 1);
+    }
+
+    log.error('claude error', { thread: threadId, elapsed, err: msg });
+    const friendly = userFriendlyError(msg) ?? '';
+    const kind = classifyHardError(msg);
+    // Quota / auth are worth failing over to another provider. Throw a
+    // typed error so the caller can decide; the friendly string lives on
+    // the error for the no-failover fallback.
+    if (kind !== 'other') throw new ClaudeHardError(kind, friendly, msg);
+    return friendly;
   }
 }

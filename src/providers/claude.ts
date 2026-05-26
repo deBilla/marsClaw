@@ -13,9 +13,22 @@ function claudeIsAuthed(): boolean {
     const text = readFileSync(cfg, 'utf-8');
     // Claude Code writes oauthAccount after login; presence is the cleanest signal.
     return text.includes('"oauthAccount"') || text.includes('"primaryApiKey"');
-  } catch {
+  } catch (err) {
+    // File unreadable (permission, race) — treat as not-authed.
+    void err;
     return false;
   }
+}
+
+/**
+ * True when the bot is paying by the metered Anthropic API (per-token billing).
+ * False when running under a Claude Pro/Max subscription via OAuth — in that
+ * case `SDKResultSuccess.total_cost_usd` reports the API-equivalent value but
+ * no money actually changes hands per turn, so the daily budget cap is
+ * meaningless and should be skipped.
+ */
+export function isUsingMeteredApi(): boolean {
+  return !!process.env.ANTHROPIC_API_KEY;
 }
 
 export const claude: Provider = {

@@ -2,7 +2,7 @@
 
 import { existsSync, statSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { DB_PATH } from '../db.ts';
+import { DB_PATH } from '../db/connection.ts';
 import { PROVIDERS } from '../providers/registry.ts';
 
 const providerName = process.env.AGENT_PROVIDER ?? 'gemini';

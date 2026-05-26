@@ -1,9 +1,29 @@
 import { copyFileSync, existsSync } from 'node:fs';
-import { initDb, markOutboxDelivered, takePendingOutbox } from './db.ts';
+import { initDb } from './db/connection.ts';
+import {
+  incrementOutboxAttempt,
+  markOutboxDelivered,
+  markOutboxFailed,
+  MAX_ATTEMPTS,
+  takePendingOutbox,
+} from './db/outbox.ts';
 import { createTelegramChannel } from './channels/telegram.ts';
 import { ChannelRouter } from './channels/router.ts';
 import { handleMessage } from './agent.ts';
 import { printRunningBanner } from './cli/branding.ts';
+import { log } from './lib/log.ts';
+import { loadConfig } from './lib/config.ts';
+import { enforceStartupBackoff, resetCircuitBreaker } from './lib/circuit-breaker.ts';
+import { pauseTypingAfterDelivery, shutdownTyping } from './lib/typing.ts';
+import { startBackupSchedule, stopBackupSchedule } from './lib/backup.ts';
+import { startHealthServer, stopHealthServer } from './lib/health-server.ts';
+
+// FIRST thing on boot: if we've been crash-looping, sleep before doing
+// anything that might burn API quota. resetCircuitBreaker() in shutdown()
+// wipes the counter on clean exits.
+await enforceStartupBackoff();
+
+const config = loadConfig();
 
 // Ensure local-only memory file exists before any agent runs against it.
 if (!existsSync('MEMORY.md') && existsSync('MEMORY.template.md')) {
@@ -15,11 +35,11 @@ const inFlight = new Map<string, Promise<void>>();
 const router = new ChannelRouter();
 
 // Single dispatcher all channels share. Serializes per-thread so we never run
-// two agent subprocesses for the same chat at once.
+// two agent processes for the same chat at once.
 const onMessage = (threadId: string, text: string) => {
   const prev = inFlight.get(threadId) ?? Promise.resolve();
   const next = prev.then(() => handleMessage(db, router, threadId, text)).catch((err) => {
-    console.error(`[agent] ${threadId}`, err);
+    log.error('agent handler failed', { threadId, err });
   });
   inFlight.set(
     threadId,
@@ -33,7 +53,7 @@ const onMessage = (threadId: string, text: string) => {
 if (process.env.TELEGRAM_BOT_TOKEN) {
   const ch = createTelegramChannel({ token: process.env.TELEGRAM_BOT_TOKEN, onMessage });
   router.register('telegram', ch);
-  console.log('[nothingclaw] telegram enabled');
+  log.info('channel enabled', { name: 'telegram' });
 }
 
 // Slack (lazy-loaded so non-Slack users don't pay the import cost)
@@ -45,7 +65,7 @@ if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
     onMessage,
   });
   router.register('slack', ch);
-  console.log('[nothingclaw] slack enabled');
+  log.info('channel enabled', { name: 'slack' });
 }
 
 // WhatsApp (Baileys, QR-scan auth on first run)
@@ -53,43 +73,93 @@ if (process.env.NOTHINGCLAW_WHATSAPP === '1') {
   const { createWhatsappChannel } = await import('./channels/whatsapp.ts');
   const ch = await createWhatsappChannel({ onMessage });
   router.register('whatsapp', ch);
-  console.log('[nothingclaw] whatsapp enabled');
+  log.info('channel enabled', { name: 'whatsapp' });
+  if (config.allowed_jids.length === 0) {
+    log.warn('WhatsApp allow-list disabled — accepting from any sender. Set allowed_jids in data/config.json to restrict.');
+  } else {
+    log.info('WhatsApp allow-list active', { count: config.allowed_jids.length });
+  }
 }
 
 if (router.list().length === 0) {
-  console.error('No channels enabled. Run `bun run setup` to wire one up.');
+  log.fatal('No channels enabled. Run `bun run setup` to wire one up.');
   process.exit(1);
 }
 
 // Outbox drain — delivers messages the agent queued via mcp send_message / speak.
-// `draining` guard prevents concurrent ticks from racing on the same row:
-// without it, a slow send (e.g. while WhatsApp is reconnecting) gets re-fetched
-// by the next tick and delivered multiple times.
-let draining = false;
-const drainTimer = setInterval(async () => {
-  if (draining) return;
-  draining = true;
-  try {
-    const pending = takePendingOutbox(db, 20);
-    for (const row of pending) {
-      try {
-        await router.send(row.thread_id, row.text, row.audio_path ? { audioPath: row.audio_path } : undefined);
-        markOutboxDelivered(db, row.id);
-      } catch (err) {
-        console.error(`[outbox] deliver ${row.id}`, err);
+// Two-tier polling: fast 250ms while there's work to drain, slow 5s when idle.
+// One tick at a time, scheduled via recursive setTimeout — no race on the same row.
+const FAST_TICK_MS = 250;
+const IDLE_TICK_MS = 5000;
+let drainTimer: ReturnType<typeof setTimeout> | null = null;
+let shuttingDown = false;
+
+async function drainOnce(): Promise<number> {
+  const pending = takePendingOutbox(db, 20);
+  let delivered = 0;
+  for (const row of pending) {
+    try {
+      const sendOpts: { audioPath?: string; filePath?: string; fileName?: string } = {};
+      if (row.audio_path) sendOpts.audioPath = row.audio_path;
+      if (row.file_path) sendOpts.filePath = row.file_path;
+      if (row.file_name) sendOpts.fileName = row.file_name;
+      await router.send(
+        row.thread_id,
+        row.text,
+        Object.keys(sendOpts).length ? sendOpts : undefined,
+      );
+      markOutboxDelivered(db, row.id);
+      // Briefly pause the typing indicator so the client renders cleanly.
+      pauseTypingAfterDelivery(row.thread_id);
+      delivered++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const newAttempts = row.attempts + 1;
+      if (newAttempts >= MAX_ATTEMPTS) {
+        markOutboxFailed(db, row.id, msg);
+        log.error('outbox delivery permanently failed', {
+          id: row.id,
+          thread: row.thread_id,
+          attempts: newAttempts,
+          err: msg,
+        });
+      } else {
+        incrementOutboxAttempt(db, row.id, msg);
+        log.warn('outbox delivery failed — will retry', {
+          id: row.id,
+          thread: row.thread_id,
+          attempts: newAttempts,
+          err: msg,
+        });
       }
     }
-  } finally {
-    draining = false;
   }
-}, 500);
+  return delivered;
+}
+
+function scheduleNextDrain(intervalMs: number): void {
+  if (shuttingDown) return;
+  drainTimer = setTimeout(async () => {
+    const delivered = await drainOnce();
+    scheduleNextDrain(delivered > 0 ? FAST_TICK_MS : IDLE_TICK_MS);
+  }, intervalMs);
+}
+
+scheduleNextDrain(IDLE_TICK_MS);
+startBackupSchedule();
+const healthServer = startHealthServer({ db, channels: router.list() });
 
 const shutdown = () => {
-  clearInterval(drainTimer);
+  shuttingDown = true;
+  if (drainTimer) clearTimeout(drainTimer);
+  stopBackupSchedule();
+  stopHealthServer(healthServer);
+  shutdownTyping();
   db.close();
+  resetCircuitBreaker();
   process.exit(0);
 };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-printRunningBanner(router.list(), process.env.AGENT_PROVIDER ?? 'gemini');
+printRunningBanner(router.list(), config.agent_provider);

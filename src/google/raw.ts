@@ -49,7 +49,10 @@ export function summarize(data: unknown, maxLen = 8000): string {
   let json: string;
   try {
     json = JSON.stringify(data, null, 2);
-  } catch {
+  } catch (err) {
+    // Circular references or BigInt — fall back to String(). Failure here
+    // is purely cosmetic, the caller still gets text.
+    void err;
     json = String(data);
   }
   if (json.length <= maxLen) return json;

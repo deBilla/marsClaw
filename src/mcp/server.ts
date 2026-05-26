@@ -2,6 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { sendTool } from './send.ts';
+import { sendFileTool } from './send_file.ts';
 import { speakTool } from './speak.ts';
 import { gmailRecentTool, gmailSearchTool, gmailGetTool } from './gmail.ts';
 import { calendarListTool, calendarCreateTool, calendarRawTool } from './calendar.ts';
@@ -13,6 +14,7 @@ import { googleAccountsTool } from './google_accounts.ts';
 
 const tools = [
   sendTool,
+  sendFileTool,
   speakTool,
   googleAccountsTool,
   gmailRecentTool,

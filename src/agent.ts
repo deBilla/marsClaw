@@ -1,9 +1,12 @@
 import { spawn } from 'node:child_process';
 import type { Database } from 'bun:sqlite';
-import { appendMessage, loadHistory, type HistoryRow } from './db.ts';
+import { appendMessage, loadHistory, type HistoryRow } from './db/messages.ts';
 import type { Channel } from './channels/types.ts';
-import { pickProvider } from './providers/registry.ts';
+import { PROVIDERS, pickProvider } from './providers/registry.ts';
 import { runClaudeSdk } from './providers/claude-sdk.ts';
+import { ClaudeHardError } from './providers/claude-error.ts';
+import { startTypingRefresh, stopTypingRefresh, pauseTypingAfterDelivery } from './lib/typing.ts';
+import { log } from './lib/log.ts';
 
 const provider = pickProvider();
 const PROJECT_ROOT = process.cwd();
@@ -34,26 +37,55 @@ export async function handleMessage(
 ): Promise<void> {
   appendMessage(db, threadId, 'user', userText);
 
-  let response: string;
-  if (provider.name === 'claude') {
-    // SDK path: session resume keeps the transcript on disk; we only send the
-    // new user message. Sqlite history is still appended for /status etc.
-    response = await runClaudeSdk(db, threadId, userText, AGENT_TIMEOUT_MS);
-  } else {
-    // Gemini path: no session concept — pass recent history via the prompt.
-    const history = loadHistory(db, threadId, HISTORY_TURNS);
-    const prompt = buildPrompt(history, userText);
-    response = await runProvider(prompt, threadId);
-  }
+  // Begin the "typing…" indicator. The refresher fires every 4s while the
+  // agent's heartbeat is fresh, so the user sees activity even on long turns.
+  startTypingRefresh(threadId, channel);
 
-  const reply = response.trim();
-  if (!reply) {
-    console.log(`[agent] ${threadId} produced empty reply — skipping send`);
-    return;
-  }
+  try {
+    let response: string;
+    if (provider.name === 'claude') {
+      // SDK path: session resume keeps the transcript on disk; we only send the
+      // new user message. Sqlite history is still appended for /status etc.
+      try {
+        response = await runClaudeSdk(db, threadId, userText, AGENT_TIMEOUT_MS);
+      } catch (err) {
+        if (err instanceof ClaudeHardError && PROVIDERS.gemini.isAuthed()) {
+          // Claude is out of quota or auth-broken; fall back to Gemini for
+          // this turn so the user still gets an answer. Logged so you can
+          // see when failover fires.
+          log.warn('claude hard error — failing over to gemini', {
+            thread: threadId,
+            kind: err.kind,
+          });
+          const history = loadHistory(db, threadId, HISTORY_TURNS);
+          const prompt = buildPrompt(history, userText);
+          response = await runProviderWith(PROVIDERS.gemini, prompt, threadId);
+        } else if (err instanceof ClaudeHardError) {
+          // No failover available — surface the friendly string.
+          response = err.friendly;
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      // Gemini path: no session concept — pass recent history via the prompt.
+      const history = loadHistory(db, threadId, HISTORY_TURNS);
+      const prompt = buildPrompt(history, userText);
+      response = await runProvider(prompt, threadId);
+    }
 
-  appendMessage(db, threadId, 'assistant', reply);
-  await channel.send(threadId, reply);
+    const reply = response.trim();
+    if (!reply) {
+      console.log(`[agent] ${threadId} produced empty reply — skipping send`);
+      return;
+    }
+
+    appendMessage(db, threadId, 'assistant', reply);
+    await channel.send(threadId, reply);
+    pauseTypingAfterDelivery(threadId);
+  } finally {
+    stopTypingRefresh(threadId);
+  }
 }
 
 function userFriendlyError(stderr: string): string | null {
@@ -72,11 +104,19 @@ function userFriendlyError(stderr: string): string | null {
 }
 
 function runProvider(prompt: string, threadId: string): Promise<string> {
+  return runProviderWith(provider, prompt, threadId);
+}
+
+function runProviderWith(
+  p: typeof provider,
+  prompt: string,
+  threadId: string,
+): Promise<string> {
   return new Promise((resolveP) => {
     const t0 = Date.now();
-    console.log(`[${provider.name}] start  ${threadId}`);
+    console.log(`[${p.name}] start  ${threadId}`);
 
-    const child = spawn(provider.bin, provider.buildArgs(prompt), {
+    const child = spawn(p.bin, p.buildArgs(prompt), {
       cwd: PROJECT_ROOT,
       env: {
         ...process.env,
@@ -91,7 +131,7 @@ function runProvider(prompt: string, threadId: string): Promise<string> {
 
     const timeout = setTimeout(() => {
       if (finished) return;
-      console.error(`[${provider.name}] timeout after ${AGENT_TIMEOUT_MS}ms — killing ${threadId}`);
+      console.error(`[${p.name}] timeout after ${AGENT_TIMEOUT_MS}ms — killing ${threadId}`);
       child.kill('SIGTERM');
       setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 2000);
     }, AGENT_TIMEOUT_MS);
@@ -102,8 +142,8 @@ function runProvider(prompt: string, threadId: string): Promise<string> {
     child.on('error', (e) => {
       finished = true;
       clearTimeout(timeout);
-      console.error(`[${provider.name}] spawn error`, e);
-      resolveP(`(failed to spawn ${provider.bin}: ${e.message})`);
+      console.error(`[${p.name}] spawn error`, e);
+      resolveP(`(failed to spawn ${p.bin}: ${e.message})`);
     });
 
     child.on('close', (code) => {
@@ -114,13 +154,13 @@ function runProvider(prompt: string, threadId: string): Promise<string> {
       if (code !== 0) {
         const friendly = userFriendlyError(err);
         if (friendly) {
-          console.error(`[${provider.name}] exit ${code} in ${elapsed}s  ${threadId}  → user-facing: ${friendly}`);
+          console.error(`[${p.name}] exit ${code} in ${elapsed}s  ${threadId}  → user-facing: ${friendly}`);
           resolveP(friendly);
           return;
         }
-        console.error(`[${provider.name}] exit ${code} in ${elapsed}s  ${threadId}  stderr=${err.slice(-300).trim()}`);
+        console.error(`[${p.name}] exit ${code} in ${elapsed}s  ${threadId}  stderr=${err.slice(-300).trim()}`);
       } else {
-        console.log(`[${provider.name}] end    ${threadId}  ${elapsed}s  ${out.length} chars`);
+        console.log(`[${p.name}] end    ${threadId}  ${elapsed}s  ${out.length} chars`);
       }
       resolveP(out);
     });

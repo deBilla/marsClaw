@@ -5,7 +5,7 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { DB_PATH } from '../db.ts';
+import { DB_PATH } from '../db/connection.ts';
 import { synthesize, KOKORO_OUTPUT_FORMAT } from '../voice.ts';
 
 const OUT_DIR = process.env.NOTHINGCLAW_VOICE_OUT ?? 'data/voice-out';

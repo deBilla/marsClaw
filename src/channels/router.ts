@@ -27,4 +27,12 @@ export class ChannelRouter implements Channel {
     }
     await channel.send(threadId, text, opts);
   }
+
+  /** Best-effort typing signal. No-op on channels that don't implement it. */
+  async setTyping(threadId: string): Promise<void> {
+    const prefix = threadId.split(':', 1)[0];
+    const channel = this.channels.get(prefix);
+    if (!channel || !channel.setTyping) return;
+    await channel.setTyping(threadId);
+  }
 }

@@ -33,7 +33,10 @@ function readIndex(): AccountIndex {
   try {
     const parsed = JSON.parse(raw) as AccountIndex;
     return { default: parsed.default ?? null, accounts: parsed.accounts ?? [] };
-  } catch {
+  } catch (err) {
+    // Corrupt keychain entry — fall back to empty index. Better than
+    // crashing the bot on boot; user can recover via `google login`.
+    void err;
     return { default: null, accounts: [] };
   }
 }

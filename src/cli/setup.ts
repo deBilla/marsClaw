@@ -1,13 +1,15 @@
 // Interactive setup: pick provider, install CLI, trigger login, enable channels,
 // write .env.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { PROVIDERS } from '../providers/registry.ts';
 import type { Provider, ProviderName } from '../providers/types.ts';
 import { printBanner } from './branding.ts';
+import { writeAtomic } from '../lib/atomic.ts';
+import { writeConfig } from '../lib/config.ts';
 
 const rl = createInterface({ input: stdin, output: stdout });
 
@@ -49,8 +51,15 @@ interface ChannelChoices {
   voiceEnabled: boolean;
 }
 
+async function askBotName(): Promise<string> {
+  bold('1. Choose a name for your assistant');
+  info('This is the persona the bot uses when chatting with you. Default: Mars.');
+  const name = await ask('  Bot name', 'Mars');
+  return name || 'Mars';
+}
+
 async function pickProviderInteractive(): Promise<Provider> {
-  bold('1. Pick an agent CLI');
+  bold('2. Pick an agent CLI');
   info('  [g] Gemini CLI  (Google,    npm @google/gemini-cli)');
   info('  [c] Claude Code (Anthropic, npm @anthropic-ai/claude-code)');
   while (true) {
@@ -62,7 +71,7 @@ async function pickProviderInteractive(): Promise<Provider> {
 }
 
 async function ensureProviderInstalled(p: Provider): Promise<void> {
-  bold(`2. Ensure ${p.bin} is installed`);
+  bold(`3. Ensure ${p.bin} is installed`);
   if (which(p.bin)) {
     ok(`Found: ${which(p.bin)}`);
     return;
@@ -78,9 +87,15 @@ async function ensureProviderInstalled(p: Provider): Promise<void> {
 }
 
 function resetTerminal(): void {
+  // setRawMode throws on non-TTY stdin; we guard with isTTY but Bun's stdin
+  // can transition mid-call. Swallow because raw-mode failure here is
+  // strictly cosmetic — the `stty sane` call below corrects most cases.
+  // eslint-disable-next-line no-catch-all/no-catch-all
   try {
     if (stdin.isTTY) stdin.setRawMode(false);
-  } catch { /* ignore */ }
+  } catch {
+    /* non-TTY or already cooked */
+  }
   // Restore sane terminal modes (echo on, canonical input, etc.) after the
   // child CLI's TUI exits — without this, the user's shell ends up garbled.
   spawnSync('stty', ['sane'], { stdio: 'ignore' });
@@ -89,7 +104,7 @@ function resetTerminal(): void {
 }
 
 async function triggerLogin(p: Provider): Promise<void> {
-  bold(`3. Log in to ${p.name}`);
+  bold(`4. Log in to ${p.name}`);
 
   if (p.isAuthed()) {
     ok(`Already logged in.`);
@@ -139,7 +154,7 @@ async function triggerLogin(p: Provider): Promise<void> {
 }
 
 async function askChannels(): Promise<ChannelChoices> {
-  bold('4. Connect channels');
+  bold('5. Connect channels');
   info('You can enable any combination. Skip the ones you don\'t want now — add them later by editing .env.');
 
   // Telegram
@@ -194,14 +209,14 @@ async function askChannels(): Promise<ChannelChoices> {
   return { telegramToken, slackBotToken, slackAppToken, whatsappEnabled, voiceEnabled };
 }
 
-function writeEnv(provider: ProviderName, ch: ChannelChoices): void {
+function writeEnv(ch: ChannelChoices): void {
+  // .env now holds ONLY secrets + channel-enable flags. Non-secret runtime
+  // config (bot_name, allowed_jids, timezone, etc.) lives in data/config.json.
   const managed = new Set([
-    'AGENT_PROVIDER',
     'TELEGRAM_BOT_TOKEN',
     'SLACK_BOT_TOKEN',
     'SLACK_APP_TOKEN',
     'NOTHINGCLAW_WHATSAPP',
-    'NOTHINGCLAW_VOICE',
   ]);
   const existing = existsSync('.env') ? readFileSync('.env', 'utf-8') : '';
   const lines = existing.split('\n').filter((l) => {
@@ -209,21 +224,20 @@ function writeEnv(provider: ProviderName, ch: ChannelChoices): void {
     const key = l.split('=')[0].trim();
     return !managed.has(key);
   });
-  lines.push(`AGENT_PROVIDER=${provider}`);
   if (ch.telegramToken) lines.push(`TELEGRAM_BOT_TOKEN=${ch.telegramToken}`);
   if (ch.slackBotToken) lines.push(`SLACK_BOT_TOKEN=${ch.slackBotToken}`);
   if (ch.slackAppToken) lines.push(`SLACK_APP_TOKEN=${ch.slackAppToken}`);
   if (ch.whatsappEnabled) lines.push('NOTHINGCLAW_WHATSAPP=1');
-  if (ch.voiceEnabled) lines.push('NOTHINGCLAW_VOICE=1');
   const out = lines.join('\n').replace(/\n+$/, '') + '\n';
-  writeFileSync('.env', out);
+  writeAtomic('.env', out);
 }
 
-function summarize(provider: ProviderName, ch: ChannelChoices): void {
+function summarize(botName: string, provider: ProviderName, ch: ChannelChoices): void {
   const enabled: string[] = [];
   if (ch.telegramToken)  enabled.push('telegram');
   if (ch.slackBotToken && ch.slackAppToken) enabled.push('slack');
   if (ch.whatsappEnabled) enabled.push('whatsapp');
+  ok(`name:      ${botName}`);
   ok(`provider:  ${provider}`);
   ok(`channels:  ${enabled.length ? enabled.join(', ') : 'none (will refuse to start until you add one)'}`);
   if (ch.slackBotToken && !ch.slackAppToken) warn('Slack bot token set but no app-level token — slack disabled until both are set.');
@@ -233,14 +247,21 @@ function summarize(provider: ProviderName, ch: ChannelChoices): void {
 async function main(): Promise<void> {
   printBanner('interactive setup');
 
+  const botName = await askBotName();
   const provider = await pickProviderInteractive();
   await ensureProviderInstalled(provider);
   await triggerLogin(provider);
   const channels = await askChannels();
 
-  bold('5. Writing .env');
-  writeEnv(provider.name, channels);
-  summarize(provider.name, channels);
+  bold('6. Writing .env and data/config.json');
+  writeEnv(channels);
+  writeConfig({
+    bot_name: botName,
+    agent_provider: provider.name,
+    voice_enabled: channels.voiceEnabled,
+  });
+  ok('.env (secrets) and data/config.json (runtime config) written.');
+  summarize(botName, provider.name, channels);
 
   bold('Done.');
   info('Start the bot:  bun run start');
