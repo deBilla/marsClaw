@@ -12,6 +12,9 @@ switch (cmd) {
   case 'start':
     await import('../index.ts');
     break;
+  case 'restart':
+    await import('./restart.ts');
+    break;
   case 'status':
     await import('./status.ts');
     break;
@@ -68,6 +71,7 @@ Usage:
 Commands:
   setup                       Interactive setup (provider, login, channels)
   start                       Start the bot (default)
+  restart                     Restart the launchd-managed bot in place
   status                      Show provider, db stats, recent activity
   provider [gemini|claude]    Switch agent provider (interactive if no arg)
   whatsapp <sub>              WhatsApp ops (reset | status | clear-media)

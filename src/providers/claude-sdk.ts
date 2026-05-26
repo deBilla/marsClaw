@@ -33,6 +33,7 @@ const PROVIDER_NAME = 'claude';
 const config = loadConfig();
 const BOT_NAME = config.bot_name;
 const IDLE_MS = config.idle_ms;
+const MAX_SESSION_AGE_MS = config.max_session_age_ms;
 const MAX_SESSIONS = config.max_sessions;
 const canUseTool = buildCanUseTool(config);
 
@@ -164,6 +165,7 @@ class ClaudeSession {
   private sessionId: string | null;
   private destroyed = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly createdAt = Date.now();
 
   constructor(
     public readonly threadId: string,
@@ -313,6 +315,11 @@ class ClaudeSession {
     return this.turnStartedAt;
   }
 
+  /** Epoch-ms when this session was constructed. */
+  getCreatedAt(): number {
+    return this.createdAt;
+  }
+
   armIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => this.destroy('idle'), IDLE_MS);
@@ -415,7 +422,24 @@ export function sweepStuckSessions(now: number = Date.now()): void {
       continue;
     }
     const startedAt = session.getTurnStartedAt();
-    if (startedAt === null) continue;
+    if (startedAt === null) {
+      // Idle session: enforce the absolute lifetime ceiling. Bounded by
+      // wall-clock age so a chatty thread can't keep one SDK subprocess +
+      // MCP child resident forever — leaks in any of those compound until
+      // teardown. Skipped mid-turn (startedAt !== null) so we never cut
+      // off a reply; the next sweep tick after the turn completes will
+      // catch it.
+      if (MAX_SESSION_AGE_MS > 0 && now - session.getCreatedAt() > MAX_SESSION_AGE_MS) {
+        log.info('sweep: recycling session past max age', {
+          thread: threadId,
+          ageMs: now - session.getCreatedAt(),
+          ceilingMs: MAX_SESSION_AGE_MS,
+        });
+        session.destroy('sweep: max age');
+        sessions.delete(threadId);
+      }
+      continue;
+    }
     const turnAge = now - startedAt;
     if (turnAge > ABSOLUTE_TURN_CEILING_MS) {
       log.warn('sweep: killing session past absolute turn ceiling', {

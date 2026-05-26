@@ -4,8 +4,9 @@ import { existsSync, statSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
 import { DB_PATH } from '../db/connection.ts';
 import { PROVIDERS } from '../providers/registry.ts';
+import { loadConfig } from '../lib/config.ts';
 
-const providerName = process.env.AGENT_PROVIDER ?? 'gemini';
+const providerName = loadConfig().agent_provider;
 const provider = PROVIDERS[providerName as keyof typeof PROVIDERS];
 
 console.log(`provider:        ${providerName}${provider ? '' : ' (unknown!)'}`);

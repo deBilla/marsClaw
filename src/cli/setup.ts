@@ -1,5 +1,6 @@
-// Interactive setup: pick provider, install CLI, trigger login, enable channels,
-// write .env.
+// Interactive setup: pick provider, install CLI, trigger login, enable WhatsApp,
+// write .env + data/config.json. Idempotent — re-running picks up current state
+// as defaults.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
@@ -9,7 +10,7 @@ import { PROVIDERS } from '../providers/registry.ts';
 import type { Provider, ProviderName } from '../providers/types.ts';
 import { printBanner } from './branding.ts';
 import { writeAtomic } from '../lib/atomic.ts';
-import { writeConfig } from '../lib/config.ts';
+import { loadConfig, writeConfig } from '../lib/config.ts';
 
 const rl = createInterface({ input: stdin, output: stdout });
 
@@ -24,11 +25,13 @@ async function ask(prompt: string, def?: string): Promise<string> {
   return ans || def || '';
 }
 
-async function yesNo(prompt: string, def: 'y' | 'n' = 'n'): Promise<boolean> {
+async function yesNo(prompt: string, def: boolean): Promise<boolean> {
+  const dStr = def ? 'Y/n' : 'y/N';
   while (true) {
-    const a = (await ask(`${prompt} (y/n)`, def)).toLowerCase();
-    if (a === 'y' || a === 'yes') return true;
-    if (a === 'n' || a === 'no') return false;
+    const raw = (await rl.question(`${prompt} (${dStr}): `)).trim().toLowerCase();
+    if (!raw) return def;
+    if (raw === 'y' || raw === 'yes') return true;
+    if (raw === 'n' || raw === 'no') return false;
     warn('Please answer y or n.');
   }
 }
@@ -43,27 +46,27 @@ function run(bin: string, args: string[], opts: { stdio?: 'inherit' | 'pipe' } =
   return r.status ?? 1;
 }
 
-interface ChannelChoices {
-  telegramToken: string;
-  slackBotToken: string;
-  slackAppToken: string;
-  whatsappEnabled: boolean;
-  voiceEnabled: boolean;
+function envHas(key: string): boolean {
+  if (!existsSync('.env')) return false;
+  const re = new RegExp(`^\\s*${key}\\s*=\\s*1\\s*$`, 'm');
+  return re.test(readFileSync('.env', 'utf-8'));
 }
 
-async function askBotName(): Promise<string> {
-  bold('1. Choose a name for your assistant');
-  info('This is the persona the bot uses when chatting with you. Default: Mars.');
-  const name = await ask('  Bot name', 'Mars');
-  return name || 'Mars';
+async function askBotName(current: string): Promise<string> {
+  bold('1. Bot name');
+  info('The persona name your bot uses when chatting.');
+  const name = await ask('  Bot name', current);
+  return name || current;
 }
 
-async function pickProviderInteractive(): Promise<Provider> {
-  bold('2. Pick an agent CLI');
+async function pickProviderInteractive(current: ProviderName): Promise<Provider> {
+  bold('2. Agent provider');
+  info(`Current: ${current}`);
   info('  [g] Gemini CLI  (Google,    npm @google/gemini-cli)');
   info('  [c] Claude Code (Anthropic, npm @anthropic-ai/claude-code)');
+  const defLetter = current === 'claude' ? 'c' : 'g';
   while (true) {
-    const c = (await ask('Choice (g/c)', 'g')).toLowerCase();
+    const c = (await ask('  Choice (g/c)', defLetter)).toLowerCase();
     if (c === 'g' || c === 'gemini') return PROVIDERS.gemini;
     if (c === 'c' || c === 'claude') return PROVIDERS.claude;
     warn('Please enter "g" or "c".');
@@ -71,14 +74,18 @@ async function pickProviderInteractive(): Promise<Provider> {
 }
 
 async function ensureProviderInstalled(p: Provider): Promise<void> {
-  bold(`3. Ensure ${p.bin} is installed`);
-  if (which(p.bin)) {
-    ok(`Found: ${which(p.bin)}`);
+  bold(`3. Install ${p.bin}`);
+  const found = which(p.bin);
+  if (found) {
+    ok(`Found: ${found}`);
     return;
   }
   info(`Installing ${p.npmPackage} via npm -g …`);
   if (run('npm', ['install', '-g', p.npmPackage]) !== 0) {
-    throw new Error(`Failed to install ${p.npmPackage}. Re-run with sudo or fix npm prefix.`);
+    throw new Error(
+      `Failed to install ${p.npmPackage}. Re-run with sudo, or fix your npm prefix ` +
+      `(npm config set prefix ~/.npm-global) and add ~/.npm-global/bin to PATH.`,
+    );
   }
   if (!which(p.bin)) {
     throw new Error(`${p.bin} installed but not on PATH. Open a new shell and re-run setup.`);
@@ -96,10 +103,7 @@ function resetTerminal(): void {
   } catch {
     /* non-TTY or already cooked */
   }
-  // Restore sane terminal modes (echo on, canonical input, etc.) after the
-  // child CLI's TUI exits — without this, the user's shell ends up garbled.
   spawnSync('stty', ['sane'], { stdio: 'ignore' });
-  // Clear residue from the child's TUI and reset cursor.
   stdout.write('\x1b[2J\x1b[H');
 }
 
@@ -107,13 +111,12 @@ async function triggerLogin(p: Provider): Promise<void> {
   bold(`4. Log in to ${p.name}`);
 
   if (p.isAuthed()) {
-    ok(`Already logged in.`);
+    ok('Already logged in.');
     return;
   }
 
   info(`Launching ${p.bin}. Your browser will open for OAuth — complete it there.`);
-  info(`You don't need to do anything in this terminal. Setup resumes automatically when login completes.`);
-  // Brief pause so the user reads the instructions before the TUI takes over.
+  info("You don't need to do anything in this terminal. Setup resumes automatically when login completes.");
   await new Promise((r) => setTimeout(r, 800));
 
   const child = spawn(p.bin, [], { stdio: 'inherit' });
@@ -149,117 +152,108 @@ async function triggerLogin(p: Provider): Promise<void> {
   if (p.isAuthed()) {
     ok(`Logged in to ${p.name}.`);
   } else {
-    warn(`Login did not complete. You can re-run setup later (it's idempotent).`);
+    warn("Login did not complete. You can re-run setup later (it's idempotent).");
   }
 }
 
-async function askChannels(): Promise<ChannelChoices> {
-  bold('5. Connect channels');
-  info('You can enable any combination. Skip the ones you don\'t want now — add them later by editing .env.');
+interface ChannelChoices {
+  whatsappEnabled: boolean;
+  voiceEnabled: boolean;
+}
 
-  // Telegram
-  let telegramToken = '';
-  info('\n  Telegram:');
-  if (await yesNo('  Connect Telegram?', 'y')) {
-    info('  Create a bot via @BotFather on Telegram, then paste the token below.');
-    telegramToken = await ask('  Bot token');
+async function askChannels(currentVoice: boolean): Promise<ChannelChoices> {
+  bold('5. WhatsApp + voice');
+
+  const whatsappAlready = envHas('NOTHINGCLAW_WHATSAPP');
+  info('Connects via Baileys (unofficial WhatsApp library) — QR scan from your phone.');
+  if (whatsappAlready) info('  Currently enabled in .env.');
+  warn('Unofficial: not endorsed by Meta. Use at your own risk.');
+  const whatsappEnabled = await yesNo('  Enable WhatsApp?', true);
+  if (whatsappEnabled && !whatsappAlready) {
+    info('  On first `bun run start`, a QR code prints in the terminal.');
+    info('  WhatsApp → Settings → Linked devices → Link a device → scan it.');
   }
 
-  // Slack
-  let slackBotToken = '';
-  let slackAppToken = '';
-  info('\n  Slack:');
-  if (await yesNo('  Connect Slack?', 'n')) {
-    info('  Create a Slack app at https://api.slack.com/apps with:');
-    info('    - Socket Mode enabled');
-    info('    - App-level token (xapp-…) with scope: connections:write');
-    info('    - Bot token scopes: chat:write, im:history, im:read, im:write, app_mentions:read');
-    info('    - Event subscriptions: message.im, app_mention');
-    slackBotToken = await ask('  Bot token (xoxb-…)');
-    slackAppToken = await ask('  App-level token (xapp-…)');
-  }
+  info('');
+  info('Voice transcription (local Whisper, ~600MB one-time install).');
+  if (currentVoice) info('  Currently enabled in config.');
+  const voiceDefault = currentVoice || whatsappEnabled;
+  const voiceEnabled = await yesNo('  Enable voice?', voiceDefault);
 
-  // WhatsApp
-  info('\n  WhatsApp:');
-  info('  Uses Baileys (unofficial WhatsApp library) — connect via QR scan from your phone.');
-  warn('  Unofficial: not endorsed by Meta. Use at your own risk.');
-  const whatsappEnabled = await yesNo('  Connect WhatsApp?', 'n');
-  if (whatsappEnabled) {
-    info('  No token needed now. On first `bun run start`, you\'ll see a QR code in the terminal.');
-    info('  In WhatsApp on your phone: Settings → Linked devices → Link a device → scan the QR.');
-    info('  Auth state is saved to data/whatsapp-auth/ for subsequent runs.');
-  }
-
-  // Voice (only meaningful if WhatsApp is on, but we ask regardless — easy to enable later)
-  info('\n  Voice (Whisper STT for WhatsApp voice notes):');
-  info('  Runs a local Python sidecar (faster-whisper). One-time install ~600MB.');
-  const voiceEnabled = await yesNo('  Enable voice transcription?', whatsappEnabled ? 'y' : 'n');
-  if (voiceEnabled) {
-    info('  Installing — this runs tools/setup-voice.sh (Python venv + model download).');
+  const venvExists = existsSync('tools/voice-env');
+  if (voiceEnabled && !venvExists) {
+    info('  Installing — running tools/setup-voice.sh (Python venv + model download).');
     const r = spawnSync('bash', ['tools/setup-voice.sh'], { stdio: 'inherit' });
     if (r.status !== 0) {
-      warn('  Voice install failed. You can retry later with `bun run voice install`.');
+      warn('  Voice install failed. Retry later with `bun run voice install`.');
     } else {
-      ok('  Voice installed. Starting Whisper sidecar…');
+      ok('  Voice installed.');
       const s = spawnSync('bun', ['run', 'src/cli/index.ts', 'voice', 'start'], { stdio: 'inherit' });
       if (s.status !== 0) warn('  Could not start sidecar automatically; run `bun run voice start` later.');
     }
+  } else if (voiceEnabled && venvExists) {
+    ok('  Voice venv already present at tools/voice-env — skipping install.');
   }
 
-  return { telegramToken, slackBotToken, slackAppToken, whatsappEnabled, voiceEnabled };
+  return { whatsappEnabled, voiceEnabled };
 }
 
-function writeEnv(ch: ChannelChoices): void {
-  // .env now holds ONLY secrets + channel-enable flags. Non-secret runtime
-  // config (bot_name, allowed_jids, timezone, etc.) lives in data/config.json.
-  const managed = new Set([
-    'TELEGRAM_BOT_TOKEN',
-    'SLACK_BOT_TOKEN',
-    'SLACK_APP_TOKEN',
-    'NOTHINGCLAW_WHATSAPP',
-  ]);
+// .env holds secrets + channel-enable flags. Non-secret runtime config
+// (bot_name, allowed_jids, timezone, etc.) lives in data/config.json.
+//
+// We manage exactly: AGENT_PROVIDER, NOTHINGCLAW_WHATSAPP.
+// Telegram/Slack tokens hand-added by power users are left untouched.
+function writeEnv(provider: ProviderName, whatsappEnabled: boolean): void {
+  const managed = new Set(['AGENT_PROVIDER', 'NOTHINGCLAW_WHATSAPP']);
   const existing = existsSync('.env') ? readFileSync('.env', 'utf-8') : '';
   const lines = existing.split('\n').filter((l) => {
     if (!l.trim() || l.trim().startsWith('#')) return true;
     const key = l.split('=')[0].trim();
     return !managed.has(key);
   });
-  if (ch.telegramToken) lines.push(`TELEGRAM_BOT_TOKEN=${ch.telegramToken}`);
-  if (ch.slackBotToken) lines.push(`SLACK_BOT_TOKEN=${ch.slackBotToken}`);
-  if (ch.slackAppToken) lines.push(`SLACK_APP_TOKEN=${ch.slackAppToken}`);
-  if (ch.whatsappEnabled) lines.push('NOTHINGCLAW_WHATSAPP=1');
+  lines.push(`AGENT_PROVIDER=${provider}`);
+  if (whatsappEnabled) lines.push('NOTHINGCLAW_WHATSAPP=1');
   const out = lines.join('\n').replace(/\n+$/, '') + '\n';
   writeAtomic('.env', out);
 }
 
 function summarize(botName: string, provider: ProviderName, ch: ChannelChoices): void {
-  const enabled: string[] = [];
-  if (ch.telegramToken)  enabled.push('telegram');
-  if (ch.slackBotToken && ch.slackAppToken) enabled.push('slack');
-  if (ch.whatsappEnabled) enabled.push('whatsapp');
   ok(`name:      ${botName}`);
   ok(`provider:  ${provider}`);
-  ok(`channels:  ${enabled.length ? enabled.join(', ') : 'none (will refuse to start until you add one)'}`);
-  if (ch.slackBotToken && !ch.slackAppToken) warn('Slack bot token set but no app-level token — slack disabled until both are set.');
-  if (ch.slackAppToken && !ch.slackBotToken) warn('Slack app-level token set but no bot token — slack disabled until both are set.');
+  ok(`whatsapp:  ${ch.whatsappEnabled ? 'on' : 'off'}`);
+  ok(`voice:     ${ch.voiceEnabled ? 'on' : 'off'}`);
+  if (!ch.whatsappEnabled) {
+    warn('No channels enabled. The bot will refuse to start until you wire one up.');
+  }
 }
 
 async function main(): Promise<void> {
   printBanner('interactive setup');
 
-  const botName = await askBotName();
-  const provider = await pickProviderInteractive();
+  if (!which('npm')) {
+    throw new Error('npm not found on PATH. Install Node.js (https://nodejs.org) and re-run setup.');
+  }
+
+  const current = loadConfig();
+
+  const botName = await askBotName(current.bot_name);
+  const provider = await pickProviderInteractive(current.agent_provider);
   await ensureProviderInstalled(provider);
   await triggerLogin(provider);
-  const channels = await askChannels();
+  const channels = await askChannels(current.voice_enabled);
 
   bold('6. Writing .env and data/config.json');
-  writeEnv(channels);
-  writeConfig({
-    bot_name: botName,
-    agent_provider: provider.name,
-    voice_enabled: channels.voiceEnabled,
-  });
+  try {
+    writeEnv(provider.name, channels.whatsappEnabled);
+    writeConfig({
+      bot_name: botName,
+      agent_provider: provider.name,
+      voice_enabled: channels.voiceEnabled,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to persist config: ${msg}`);
+  }
   ok('.env (secrets) and data/config.json (runtime config) written.');
   summarize(botName, provider.name, channels);
 

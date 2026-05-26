@@ -21,6 +21,10 @@ export interface NothingclawConfig {
   allowed_paths: string[];
   max_sessions: number;
   idle_ms: number;
+  // Hard ceiling on session lifetime regardless of activity. Bounds slow
+  // leaks in the SDK subprocess / MCP child / third-party deps that idle
+  // teardown alone can't catch on a chatty thread. 0 disables.
+  max_session_age_ms: number;
   timezone: string;
   voice_enabled: boolean;
   agent_provider: 'claude' | 'gemini';
@@ -40,6 +44,7 @@ function defaults(): NothingclawConfig {
     allowed_paths: [process.cwd()],
     max_sessions: 20,
     idle_ms: 15 * 60_000,
+    max_session_age_ms: 4 * 60 * 60_000,
     timezone: 'UTC',
     voice_enabled: false,
     agent_provider: 'gemini',
@@ -106,6 +111,9 @@ export function loadConfig(): NothingclawConfig {
 
   const envIdle = parseInt10(process.env.NOTHINGCLAW_CLAUDE_IDLE_MS);
   if (envIdle !== undefined) cfg.idle_ms = envIdle;
+
+  const envMaxAge = parseInt10(process.env.NOTHINGCLAW_CLAUDE_MAX_SESSION_AGE_MS);
+  if (envMaxAge !== undefined) cfg.max_session_age_ms = envMaxAge;
 
   const envTz = process.env.NOTHINGCLAW_TIMEZONE;
   if (envTz) cfg.timezone = envTz;
