@@ -28,7 +28,7 @@ For a deeper comparison with the multi-tenant cousin, see [docs/vs-nanoclaw.md](
 - **Images & files.** WhatsApp images are downloaded and passed to the agent for vision. The agent can deliver files back to the user via the `send_file` MCP tool.
 - **Google built-in.** OAuth-once, multiple Google accounts, MCP tools for Gmail, Calendar, Contacts, Drive, Sheets, Docs, Slides.
 - **Persistent memory.** `MEMORY.md` is the agent's own long-term notebook. A `wiki/` folder holds longer structured pages.
-- **Hardened defaults.** Per-thread message serialization, sandboxed `allowed_paths`, bash denylist, inbound rate limits, daily USD budget cap, circuit-breaker startup backoff, automatic DB + auth backups.
+- **Hardened defaults.** No shell, no web egress, no outbound/mutating Google calls until you opt in — a fresh install has no third-party exfiltration channel. Per-channel sender allow-lists; sensitive paths (`.env`, secrets, config, provider creds) off-limits regardless of `allowed_paths`; `Grep`/`Glob` recursion gate; web reads delegated to a researcher subagent gated by an URL allow-list. Every tool decision lands in an append-only audit log. See [docs/security.md](docs/security.md).
 - **One-shot setup.** `bash setup.sh` walks you from a fresh checkout to a running bot in ~2 minutes.
 
 ## Quick start
@@ -77,6 +77,7 @@ Browse the docs site at **<https://deBilla.github.io/marsClaw/>** — or read th
 - [docs/voice.md](docs/voice.md) — Whisper STT + Kokoro TTS sidecars, voices, model sizes
 - [docs/google.md](docs/google.md) — Google OAuth (Gmail/Calendar/Drive/Sheets/Docs/Slides/Contacts)
 - [docs/operations.md](docs/operations.md) — running as a launchd service, backups, observability, troubleshooting
+- [docs/security.md](docs/security.md) — threat model, capability flags, audit log, residual risks
 - [docs/development.md](docs/development.md) — codebase tour, adding a channel, adding an MCP tool, tests
 - [docs/vs-nanoclaw.md](docs/vs-nanoclaw.md) — when to pick marsClaw vs the multi-tenant cousin
 

@@ -38,14 +38,14 @@ Note the runtime mechanism is no longer the dividing line — both sides now emb
 
 | | Pros | Cons |
 |---|---|---|
-| **marsClaw** | Sandboxed to an `allowed_paths` allowlist (`bun run path`); bash denylist (`command-gate`); inbound rate limits; per-thread serialization; daily USD budget cap (`cost-tracker`); a per-tool `canUseTool` gate; Google secrets live in the macOS Keychain, never in the agent's context; automatic DB + auth backups | Still no container — a hallucinating or malicious agent operating within the allowlist can read/write/delete those paths; runs as the host user; channel tokens sit in `.env` on disk |
+| **marsClaw** | **In-process action broker:** the MCP server is the sole egress path and the only process that holds Google creds (Anthropic key withheld from it by env passthrough). **Default-deny capability flags:** `allow_shell`, `allow_web`, `allow_mutating_tools` are all off out-of-the-box — fresh install has no third-party exfil channel. **Sensitive-path guard** blocks `.env`, `data/secrets`, `data/config.json`, `data/whatsapp-auth`, `data/marsclaw.db`, `~/.claude.json`, `~/.gemini` from FS tools *regardless* of `allowed_paths`; `Grep`/`Glob` recursion gate refuses search roots that straddle them. **Web allow-list + researcher subagent:** web reads delegated to a `tools:['WebFetch']`-only subagent in an empty-room context, gated to approved hosts. **Per-channel sender allow-lists** (Telegram chat ids, Slack user ids, WhatsApp JIDs). **Append-only audit log** of every tool decision at `logs/audit.log`. Plus the existing rate-limits, budget cap, per-thread serialization, backups. See [security.md](security.md). | Still no container — enforcement is process-boundary + policy, not kernel; a malicious dependency or a re-enabled shell bypasses the in-process gates; channel tokens sit in `.env` on disk; the audit log is local-only (no remote sink) |
 | **NanoClaw** | Containerized agent; OneCLI mediates all credentialed calls (secrets never enter the agent's context); approval flows route to scoped admins → global admins → owners | OneCLI adds a long-poll loop you have to keep alive; "selective" secret mode default catches every new operator; cross-container session sharing requires extra care |
 
 ## Entity model & multi-user
 
 | | Pros | Cons |
 |---|---|---|
-| **marsClaw** | `(channel_prefix:thread_id)` is the entire identity model — 0 abstractions to learn | Anyone with your bot's chat handle can talk to your bot; no way to scope what they can do; no "admin" concept |
+| **marsClaw** | `(channel_prefix:thread_id)` is the entire identity model — 0 abstractions to learn; per-channel sender allow-lists (`allowed_telegram_chats`, `allowed_slack_users`, `allowed_jids`) drop unauthorised senders before the agent loop | Single trust tier — anyone on the allow-list is "owner"; no per-user scopes, no "admin" concept |
 | **NanoClaw** | Real users with roles (owner / admin scoped or global); per-agent-group membership; three isolation levels (agent-shared, shared, separate agents); cold-DM resolution with `user_dms` cache | The wiring matrix (users × agent_groups × messaging_groups × sessions) is a real learning curve; for a single user it's pure overhead |
 
 ## Channels
@@ -68,7 +68,7 @@ Conceptually identical architecture: local sidecars for Whisper and Kokoro.
 
 | | Pros | Cons |
 |---|---|---|
-| **marsClaw** | Whatever the chosen SDK ships (shell, read, write, edit, glob, grep, web fetch, web search) **plus** our own MCP suite: `send_message`, `send_file`, `speak`, and a full Google Workspace set — Gmail (search/read/send), Calendar, Drive, Docs, Sheets (read/write), Slides, Contacts, with multi-account support | Bound by what the Claude Agent SDK / Gemini core expose for the core loop; no sub-agent spawning, no scheduling, no built-in image gen / LaTeX |
+| **marsClaw** | Whatever the chosen SDK ships (read, write, edit, glob, grep — shell and web are off by default, see [security.md](security.md)) **plus** our own MCP suite: `send_message`, `send_file`, `speak`, and a full Google Workspace set — Gmail (search/read/send), Calendar, Drive, Docs, Sheets (read/write), Slides, Contacts, with multi-account support. A `researcher` subagent (`tools:['WebFetch']`, empty-room context) handles web reads when enabled. | Bound by what the Claude Agent SDK / Gemini core expose for the core loop; no scheduling, no built-in image gen / LaTeX |
 | **NanoClaw** | Rich custom MCP suite: `send_message`, `send_file`, `edit_message`, `schedule_task`, `ask_user_question`, `install_packages`, `add_mcp_server`, sub-`agents` spawn, `voice`, `latex`, `imagegen`, `interactive` | More to maintain; tool bugs are yours to fix; each tool's deps go into the container image |
 
 ## Memory & skills

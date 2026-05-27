@@ -15,12 +15,18 @@ import path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { log } from './log.ts';
-import { isSensitivePath } from './sensitive-paths.ts';
+import { isSensitivePath, pathContainsSensitive } from './sensitive-paths.ts';
 import { audit } from './audit-log.ts';
 import { urlAllowed } from './url-allowlist.ts';
 import type { MarsclawConfig } from './config.ts';
 
 const FS_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit']);
+// Recursive FS tools — they walk into subdirectories. The per-target
+// sensitive-path check below only validates the root they're given, so for
+// these we additionally check whether the root *contains* a sensitive
+// subtree, and we materialise the implicit cwd default so it goes through
+// the same gates.
+const RECURSIVE_FS_TOOLS = new Set(['Glob', 'Grep']);
 // Network-egress tools. Disabled unless config.allow_web — with the agent
 // reading untrusted content, an open fetch is an exfiltration channel.
 const WEB_TOOLS = new Set(['WebFetch', 'WebSearch']);
@@ -157,7 +163,14 @@ export function buildCanUseTool(config: MarsclawConfig): CanUseTool {
     }
 
     if (FS_TOOLS.has(toolName)) {
-      const targets = extractPaths(input);
+      let targets = extractPaths(input);
+      // Grep/Glob default to cwd when `path` is omitted. Materialise that
+      // here so the cwd default goes through the same allowed/sensitive
+      // checks as an explicit path — otherwise a bare `Grep({pattern:...})`
+      // silently scans the bot process's cwd, bypassing allowed_paths.
+      if (RECURSIVE_FS_TOOLS.has(toolName) && targets.length === 0) {
+        targets = [process.cwd()];
+      }
       // Sensitive files (.env, data/config.json, data/secrets, provider creds)
       // are off-limits even though they sit inside an allowed_paths root. This
       // protects credentials and stops the agent from widening its own sandbox
@@ -190,6 +203,32 @@ export function buildCanUseTool(config: MarsclawConfig): CanUseTool {
               `data/config.json allowed_paths to grant access, or restart with ` +
               `MARSCLAW_TOOL_PERMISSIONS=bypass for a one-off override.`,
           );
+        }
+      }
+      // Recursive tools (Grep, Glob) walk into subdirectories — the per-target
+      // sensitive check only validates the *root* they're given, not what gets
+      // traversed. If the root straddles a sensitive subtree (e.g. the repo
+      // root contains .env), the tool would return matches from it. Require
+      // the agent to narrow the search.
+      if (RECURSIVE_FS_TOOLS.has(toolName)) {
+        for (const t of targets) {
+          if (pathContainsSensitive(t)) {
+            log.warn('tool denied: recursive search contains sensitive subtree', {
+              tool: toolName,
+              root: t,
+            });
+            audit({
+              tool: toolName,
+              decision: 'deny',
+              layer: 'sensitive-paths',
+              subject: t,
+              reason: 'root contains sensitive subtree',
+            });
+            return denyResult(
+              `Search root ${t} contains sensitive files (.env, data/secrets, data/config.json, etc.). ` +
+                `Narrow your search to a subdirectory that excludes them (e.g. "src/", "wiki/") and try again.`,
+            );
+          }
         }
       }
       // Allowed write — ensure parent dir exists so Claude Code's Write

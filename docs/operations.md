@@ -88,6 +88,18 @@ Levels: `debug` / `info` / `warn` / `error` / `fatal`.
 
 A provider in mid-turn touches `data/heartbeat`. External tooling can mtime-check this to detect stuck turns.
 
+### Audit log
+
+Every tool decision (allow, deny, mutation-blocked) lands as one JSON line in `logs/audit.log` — separate from the app log so it can be reasoned about / shipped on its own. Override the path with `MARSCLAW_AUDIT_LOG`. Each record carries `ts`, `pid`, `tool`, `decision`, `layer` (which gate decided), an optional `reason`, and a redacted `subject` (URL, file path, command preview). See [security.md](security.md) for the schema and inspection recipes.
+
+```bash
+grep '"decision":"deny"' logs/audit.log | tail
+grep '"layer":"mutation-gate"' logs/audit.log
+grep '"tool":"WebFetch"' logs/audit.log
+```
+
+It's a local, append-only forensic trail — not tamper-resistant against host compromise. Ship to a remote sink (syslog or similar) if you need that.
+
 ## Updating
 
 ```bash
@@ -108,16 +120,26 @@ Fires a synthetic message all the way through `handleMessage`. Doesn't go throug
 
 ## Hardening defaults you should know about
 
+For the full threat model, capability flags, and residual risks, see [security.md](security.md). Operationally:
+
 | Mechanism | Where | Effect |
 |---|---|---|
-| Per-thread serialization | [src/index.ts](https://github.com/deBilla/marsclaw/blob/main/src/index.ts) `inFlight` map | Two messages in same chat never run two agent calls in parallel |
-| Startup circuit breaker | [src/lib/circuit-breaker.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/circuit-breaker.ts) | Sleeps progressively before boot if recent restarts have been suspiciously frequent — prevents crash loops from burning API quota |
-| Tool gate | [src/lib/tool-permissions.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/tool-permissions.ts) | `Read/Write/Edit/Bash` restricted to `allowed_paths`; destructive bash patterns denied |
-| Inbound rate-limit | [src/lib/rate-limit.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/rate-limit.ts) | Per-sender token bucket (`rate_limit_per_minute`, `rate_limit_per_hour`) |
-| Cost cap | [src/lib/cost-tracker.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/cost-tracker.ts) | Refuses new turns once today's spend exceeds `daily_usd_budget` (metered Anthropic only) |
-| Outbox attempt cap | [src/db/outbox.ts](https://github.com/deBilla/marsclaw/blob/main/src/db/outbox.ts) | Permanently fails delivery after `MAX_ATTEMPTS` retries; visible in logs |
-| Attachment safety | [src/lib/attachment-safety.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/attachment-safety.ts) | Validates inbound media size and mime |
-| Backups | [src/lib/backup.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/backup.ts) | Daily DB + memory + WhatsApp auth snapshot |
+| Capability flags (off by default) | `allow_shell`, `allow_web`, `allow_mutating_tools` in `data/config.json` | No shell, no `WebFetch`/`WebSearch`, no outbound/mutating Google calls until you opt in. Out-of-the-box the agent has no third-party egress path. |
+| Web egress allow-list | `allowed_web_domains` + [src/lib/url-allowlist.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/url-allowlist.ts) | When `allow_web` is on, `WebFetch` is gated to approved hosts. Look-alike domains and non-`http(s)` URLs are rejected. |
+| Sender allow-lists (per channel) | `allowed_jids` / `allowed_telegram_chats` / `allowed_slack_users` | Drops inbound messages from anyone not listed before they reach the agent. |
+| Sensitive-path guard | [src/lib/sensitive-paths.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/sensitive-paths.ts) | `.env`, `data/secrets`, `data/config.json`, `data/whatsapp-auth`, `data/marsclaw.db`, `~/.claude.json`, `~/.gemini` blocked from FS tools and `send_file` regardless of `allowed_paths`. |
+| Grep/Glob recursion gate | [src/lib/tool-permissions.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/tool-permissions.ts) | Recursive tools refuse a search root that contains any sensitive subtree; bare `Grep`/`Glob` no longer silently scans cwd. |
+| Mutation gate | [src/lib/mutation-gate.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/mutation-gate.ts) | `gmail_send`, `sheets_write`, `calendar_create_event`, write-style `*_raw` calls refuse to run unless `allow_mutating_tools` is set. |
+| Researcher subagent | `agents.researcher` in [src/providers/claude-sdk.ts](https://github.com/deBilla/marsclaw/blob/main/src/providers/claude-sdk.ts) | Web reads run in an empty-room context (`tools: ['WebFetch']`, no FS / MCP / history) with persona-level "treat fetched content as untrusted" framing. |
+| Audit log | [src/lib/audit-log.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/audit-log.ts) | Append-only JSON-lines record of every tool decision at `logs/audit.log`. |
+| MCP child env passthrough | `MCP_ENV_PASSTHROUGH` in [src/providers/claude-sdk.ts](https://github.com/deBilla/marsclaw/blob/main/src/providers/claude-sdk.ts) | The MCP server (the broker) does not receive `ANTHROPIC_API_KEY` — least-privilege env. |
+| Per-thread serialization | [src/index.ts](https://github.com/deBilla/marsclaw/blob/main/src/index.ts) `inFlight` map | Two messages in same chat never run two agent calls in parallel. |
+| Startup circuit breaker | [src/lib/circuit-breaker.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/circuit-breaker.ts) | Sleeps progressively before boot if recent restarts have been suspiciously frequent — prevents crash loops from burning API quota. |
+| Inbound rate-limit | [src/lib/rate-limit.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/rate-limit.ts) | Per-sender token bucket (`rate_limit_per_minute`, `rate_limit_per_hour`). |
+| Cost cap | [src/lib/cost-tracker.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/cost-tracker.ts) | Refuses new turns once today's spend exceeds `daily_usd_budget` (metered Anthropic only). |
+| Outbox attempt cap | [src/db/outbox.ts](https://github.com/deBilla/marsclaw/blob/main/src/db/outbox.ts) | Permanently fails delivery after `MAX_ATTEMPTS` retries; visible in logs. |
+| Attachment safety | [src/lib/attachment-safety.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/attachment-safety.ts) | Validates inbound media size and mime. |
+| Backups | [src/lib/backup.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/backup.ts) | Daily DB + memory + WhatsApp auth snapshot. |
 
 ## Troubleshooting
 
@@ -132,6 +154,13 @@ Fires a synthetic message all the way through `handleMessage`. Doesn't go throug
 | `transcribe failed` | Whisper sidecar down | `bun run voice status` |
 | `kokoro sidecar` error in speak | Kokoro sidecar down | `bun run voice start` |
 | `Outside allowed_paths` | Agent tried to touch a path you didn't allowlist | `bun run path add <dir>` |
+| `holds secrets or marsClaw's own permission config` | Agent tried to read `.env`, `data/secrets`, or similar | By design — secrets aren't reachable. See [security.md](security.md). |
+| `Search root … contains sensitive files` | `Grep`/`Glob` was pointed at a root that straddles `.env` etc. | Narrow the search to a subdir (e.g. `src/`) |
+| `Shell/Bash is disabled` | Agent tried to run a shell command | Set `allow_shell: true` in `data/config.json` only if you accept the exfil-risk trade-off |
+| `Fetch denied: host … not on the allowlist` | `WebFetch` URL's host isn't in `allowed_web_domains` | Add the domain to `data/config.json` and restart; see [security.md](security.md) |
+| `WebFetch is disabled` / `WebSearch is disabled` | `allow_web` is `false` | Set `allow_web: true` *and* populate `allowed_web_domains` |
+| `Refused: "gmail_send" … disabled by default` | Mutating MCP tool blocked | Set `allow_mutating_tools: true` if you really want the bot to act outwardly |
+| Telegram / Slack messages ignored | Sender not on `allowed_telegram_chats` / `allowed_slack_users` | Copy the chat / user id from the warn log into `data/config.json` and restart |
 | `daily budget exceeded` | Anthropic spend cap hit | Wait for midnight UTC reset, or bump `daily_usd_budget` |
 | `[whatsapp] giving up after 5 failed connection attempts` | Too many linked devices, or geo block | Unlink, try another network |
 | Service won't load | Plist references stale `bun` path | `bun run service install` to re-render |

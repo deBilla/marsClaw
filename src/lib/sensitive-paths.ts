@@ -22,6 +22,8 @@ export const SENSITIVE_PATHS: string[] = [
   path.resolve('.env'), // channel tokens, Google OAuth client id/secret
   path.resolve('data/config.json'), // allowed_paths, denylist, budget — self-escalation surface
   path.resolve('data/secrets'), // Linux refresh-token fallback files
+  path.resolve('data/whatsapp-auth'), // Baileys session credentials
+  path.resolve('data/marsclaw.db'), // chat history (not a credential, but contains everything you've ever said)
   path.join(HOME, '.claude.json'), // Claude Code OAuth / API key
   path.join(HOME, '.claude'), // Claude Code session transcripts
   path.join(HOME, '.gemini'), // Gemini CLI credentials
@@ -35,4 +37,16 @@ function isUnder(target: string, root: string): boolean {
 /** True when `target` is one of, or inside, a sensitive path. */
 export function isSensitivePath(target: string): boolean {
   return SENSITIVE_PATHS.some((s) => isUnder(target, s));
+}
+
+/**
+ * True when `rootPath` *contains* (is an ancestor of) any sensitive path.
+ * Used to gate recursive tools (Grep, Glob): the per-target sensitive check
+ * only validates the search ROOT, not what gets walked. If the root straddles
+ * a sensitive subtree, the recursive tool would return its contents — so we
+ * require the search to be narrowed to a non-straddling subdirectory.
+ */
+export function pathContainsSensitive(rootPath: string): boolean {
+  const resolved = path.resolve(rootPath);
+  return SENSITIVE_PATHS.some((s) => isUnder(s, resolved));
 }

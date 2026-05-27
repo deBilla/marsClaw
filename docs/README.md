@@ -15,6 +15,7 @@ Pick by what you need to do.
 ## Understand the system
 
 - [architecture.md](architecture.md) — message flow, components, SQLite schema, per-thread serialization, what the agent SDK delegates vs. what we own.
+- [security.md](security.md) — threat model, capability flags, sensitive-path guard, web allow-list, audit log, residual risks.
 - [vs-nanoclaw.md](vs-nanoclaw.md) — when to pick marsClaw vs the multi-tenant cousin.
 
 ## Configure it

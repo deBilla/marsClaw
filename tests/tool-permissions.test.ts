@@ -150,6 +150,40 @@ describe('canUseTool', () => {
     expect(r.behavior).toBe('deny');
   });
 
+  it('denies reads of data/whatsapp-auth and data/marsclaw.db', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_paths: [process.cwd()] }));
+    const auth = await call(fn, 'Read', { file_path: join(process.cwd(), 'data', 'whatsapp-auth', 'creds.json') });
+    const db = await call(fn, 'Read', { file_path: join(process.cwd(), 'data', 'marsclaw.db') });
+    expect(auth.behavior).toBe('deny');
+    expect(db.behavior).toBe('deny');
+  });
+
+  it('denies Grep when the search root straddles a sensitive subtree', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_paths: [process.cwd()] }));
+    // repo root contains .env, data/secrets, data/config.json → must refuse
+    const r = await call(fn, 'Grep', { pattern: 'TOKEN', path: process.cwd() });
+    expect(r.behavior).toBe('deny');
+  });
+
+  it('denies Grep with no path argument when cwd contains sensitive files', async () => {
+    // The implicit cwd default is materialised and run through the same gate.
+    const fn = buildCanUseTool(configWith({ allowed_paths: [process.cwd()] }));
+    const r = await call(fn, 'Grep', { pattern: 'TOKEN' });
+    expect(r.behavior).toBe('deny');
+  });
+
+  it('allows Grep on a subdirectory that does not contain sensitive files', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_paths: [process.cwd()] }));
+    const r = await call(fn, 'Grep', { pattern: 'TOKEN', path: join(process.cwd(), 'src') });
+    expect(r.behavior).toBe('allow');
+  });
+
+  it('denies Glob whose root straddles a sensitive subtree', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_paths: [process.cwd()] }));
+    const r = await call(fn, 'Glob', { pattern: '**/*', path: process.cwd() });
+    expect(r.behavior).toBe('deny');
+  });
+
   it('denies Bash reads of the data/secrets store', async () => {
     const fn = buildCanUseTool(configWith({}));
     const r = await call(fn, 'Bash', { command: 'cat data/secrets/google-refresh-token.txt' });
