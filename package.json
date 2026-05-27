@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.150",
+    "@google/gemini-cli-core": "0.43.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@slack/bolt": "^3.22.0",
     "baileys": "7.0.0-rc13",
@@ -53,5 +54,8 @@
     "prettier": "^3.4.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.15.0"
+  },
+  "overrides": {
+    "google-auth-library": "^10.1.0"
   }
 }
