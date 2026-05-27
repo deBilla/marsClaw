@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # nothingClaw bootstrap installer.
 #
-# Detects OS, installs Bun if missing, installs deps, then hands off to the
-# interactive setup CLI.
+# Detects OS, ensures nvm + Node (via nvm), installs Bun (via npm), installs
+# deps, then hands off to the interactive setup CLI.
 
 set -e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+
+# Node version installed through nvm. "--lts" tracks the latest LTS; override
+# with e.g. NODE_VERSION=22 for a pinned, reproducible version.
+NODE_VERSION="${NODE_VERSION:---lts}"
 
 bold() { printf "\033[1m%s\033[0m\n" "$1"; }
 ok()   { printf "\033[32m✓\033[0m %s\n" "$1"; }
@@ -23,25 +27,41 @@ case "$OS" in
   *) err "Unsupported OS: $OS. Use macOS, Linux, or WSL."; exit 1 ;;
 esac
 
-# Install Bun if missing
+# nvm is a shell function, not a binary — it won't appear on PATH until its
+# script is sourced into the current shell. Load it if already installed.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+load_nvm() { [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"; return 0; }
+load_nvm
+
+# Install nvm if missing
+if ! command -v nvm >/dev/null 2>&1; then
+  bold "Installing nvm..."
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  load_nvm
+  if ! command -v nvm >/dev/null 2>&1; then
+    err "nvm install finished but \`nvm\` is not available. Reopen your shell and re-run setup.sh."
+    exit 1
+  fi
+fi
+ok "nvm: $(nvm --version)"
+
+# Install + select the Node version via nvm
+bold "Installing Node ($NODE_VERSION) via nvm..."
+nvm install "$NODE_VERSION"
+nvm use "$NODE_VERSION"
+ok "node: $(node --version)"
+ok "npm: $(npm --version)"
+
+# Install Bun via npm (using the nvm-managed Node) if missing
 if ! command -v bun >/dev/null 2>&1; then
   bold "Installing Bun..."
-  curl -fsSL https://bun.sh/install | bash
-  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
-  export PATH="$BUN_INSTALL/bin:$PATH"
+  npm install -g bun
   if ! command -v bun >/dev/null 2>&1; then
     err "Bun install finished but \`bun\` is not on PATH. Reopen your shell and re-run setup.sh."
     exit 1
   fi
 fi
 ok "Bun: $(bun --version)"
-
-# Ensure node + npm (needed to globally install the provider CLI)
-if ! command -v npm >/dev/null 2>&1; then
-  err "npm not found. Install Node.js (https://nodejs.org) and re-run setup.sh."
-  exit 1
-fi
-ok "npm: $(npm --version)"
 
 # Seed local-only files from templates if missing
 if [ ! -f MEMORY.md ] && [ -f MEMORY.template.md ]; then
