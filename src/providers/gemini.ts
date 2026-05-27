@@ -18,7 +18,8 @@ export const gemini: Provider = {
   bin: process.env.GEMINI_BIN ?? 'gemini',
   npmPackage: '@google/gemini-cli',
   buildArgs(prompt) {
-    return ['-p', prompt];
+    // --skip-trust bypasses the trusted-folder gate (no human in this loop).
+    return ['-p', prompt, '--skip-trust'];
   },
   isAuthed: geminiIsAuthed,
 };
