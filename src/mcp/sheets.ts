@@ -2,6 +2,7 @@
 
 import { sheetsClient } from '../google/clients.ts';
 import { callMethodPath, rawToolDescription, summarize } from '../google/raw.ts';
+import { blockIfMutationsDisabled, blockIfMutatingMethodDisabled } from '../lib/mutation-gate.ts';
 
 function errMsg(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -81,6 +82,8 @@ export const sheetsWriteTool = {
   },
 
   async handler(args: Record<string, unknown>) {
+    const blocked = blockIfMutationsDisabled('sheets_write');
+    if (blocked) return blocked;
     const id = String(args.spreadsheet_id ?? '').trim();
     const range = String(args.range ?? '').trim();
     const values = args.values as unknown[][];
@@ -140,6 +143,8 @@ export const sheetsRawTool = {
     const params = (args.params ?? {}) as Record<string, unknown>;
     const account = args.account ? String(args.account) : undefined;
     if (!method) return { content: [{ type: 'text', text: 'Error: method is required' }], isError: true };
+    const blocked = blockIfMutatingMethodDisabled('sheets_raw', method);
+    if (blocked) return blocked;
     try {
       const data = await callMethodPath(sheetsClient(account), method, params);
       return { content: [{ type: 'text', text: summarize(data) }] };

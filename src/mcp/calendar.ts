@@ -3,6 +3,7 @@
 
 import { calendarClient } from '../google/clients.ts';
 import { callMethodPath, rawToolDescription, summarize } from '../google/raw.ts';
+import { blockIfMutationsDisabled, blockIfMutatingMethodDisabled } from '../lib/mutation-gate.ts';
 
 function errMsg(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -100,6 +101,8 @@ export const calendarCreateTool = {
   },
 
   async handler(args: Record<string, unknown>) {
+    const blocked = blockIfMutationsDisabled('calendar_create_event');
+    if (blocked) return blocked;
     const account = args.account ? String(args.account) : undefined;
     const calendarId = args.calendar_id ? String(args.calendar_id) : 'primary';
     const summary = String(args.summary ?? '').trim();
@@ -161,6 +164,8 @@ export const calendarRawTool = {
     if (!method) {
       return { content: [{ type: 'text', text: 'Error: method is required' }], isError: true };
     }
+    const blocked = blockIfMutatingMethodDisabled('calendar_raw', method);
+    if (blocked) return blocked;
     try {
       const data = await callMethodPath(calendarClient(account), method, params);
       return { content: [{ type: 'text', text: summarize(data) }] };

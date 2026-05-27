@@ -8,6 +8,8 @@
 //   - Event subscriptions: message.im (DMs), app_mention (channels)
 
 import { App, LogLevel } from '@slack/bolt';
+import { loadConfig } from '../lib/config.ts';
+import { log } from '../lib/log.ts';
 import type { Channel, ChannelInit, SendOpts } from './types.ts';
 
 export interface SlackOptions extends ChannelInit {
@@ -25,36 +27,62 @@ export async function createSlackChannel(opts: SlackOptions): Promise<Channel> {
     logLevel: LogLevel.WARN,
   });
 
+  // Sender allow-list. Non-empty = reject any Slack user not listed. Empty =
+  // accept all, warning once per new user id so the owner can lock it down.
+  const allowed = new Set(loadConfig().allowed_slack_users.map((u) => String(u).trim()).filter(Boolean));
+  const warnedOpen = new Set<string>();
+  function senderAllowed(user: string | undefined): boolean {
+    const uid = String(user ?? '');
+    if (allowed.size === 0) {
+      if (uid && !warnedOpen.has(uid)) {
+        warnedOpen.add(uid);
+        log.warn('slack allow-list disabled — accepting from any user', {
+          user: uid,
+          hint: `set allowed_slack_users to ["${uid}"] in data/config.json to restrict`,
+        });
+      }
+      return true;
+    }
+    if (allowed.has(uid)) return true;
+    log.warn('slack rejected — sender not in allow-list', {
+      user: uid,
+      hint: 'add this user id to allowed_slack_users in data/config.json to grant access',
+    });
+    return false;
+  }
+
   app.message(async ({ message }) => {
     if ('subtype' in message && message.subtype) return; // edits, joins, bot-sent, etc.
     const m = message as { text?: string; channel?: string; user?: string; bot_id?: string };
     if (m.bot_id) return;
     if (!m.text || !m.channel) return;
+    if (!senderAllowed(m.user)) return;
     const threadId = `${PREFIX}${m.channel}`;
     try {
       await opts.onMessage(threadId, m.text);
     } catch (err) {
-      console.error('[slack] handler error', err);
+      log.error('slack handler error', { err });
     }
   });
 
   app.event('app_mention', async ({ event }) => {
-    const e = event as { text?: string; channel?: string };
+    const e = event as { text?: string; channel?: string; user?: string };
     if (!e.text || !e.channel) return;
+    if (!senderAllowed(e.user)) return;
     const threadId = `${PREFIX}${e.channel}`;
     try {
       await opts.onMessage(threadId, e.text);
     } catch (err) {
-      console.error('[slack] mention handler error', err);
+      log.error('slack mention handler error', { err });
     }
   });
 
   app.error(async (err) => {
-    console.error('[slack] error', err);
+    log.error('slack error', { err });
   });
 
   await app.start();
-  console.log('[slack] connected (socket mode)');
+  log.info('slack connected (socket mode)');
 
   return {
     async send(threadId: string, text: string, _opts?: SendOpts) {

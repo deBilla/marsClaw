@@ -4,6 +4,7 @@
 
 import { docsClient } from '../google/clients.ts';
 import { callMethodPath, rawToolDescription, summarize } from '../google/raw.ts';
+import { blockIfMutatingMethodDisabled } from '../lib/mutation-gate.ts';
 
 function errMsg(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -112,6 +113,8 @@ export const docsRawTool = {
     const params = (args.params ?? {}) as Record<string, unknown>;
     const account = args.account ? String(args.account) : undefined;
     if (!method) return { content: [{ type: 'text', text: 'Error: method is required' }], isError: true };
+    const blocked = blockIfMutatingMethodDisabled('docs_raw', method);
+    if (blocked) return blocked;
     try {
       const data = await callMethodPath(docsClient(account), method, params);
       return { content: [{ type: 'text', text: summarize(data) }] };

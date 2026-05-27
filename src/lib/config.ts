@@ -32,6 +32,14 @@ export interface MarsclawConfig {
   // Cleared once paired. Only meaningful while whatsapp_pair_owner is true.
   whatsapp_pair_code: string;
   allowed_jids: string[];
+  // Telegram chat ids allowed to message the bot. Non-empty = enforce (reject
+  // anyone not listed). Empty = accept all, logging each new sender's chat id
+  // so you can lock it down. Telegram has no phone-based identity, so this is
+  // the channel's only sender gate.
+  allowed_telegram_chats: string[];
+  // Slack user ids allowed to message the bot. Same semantics as
+  // allowed_telegram_chats (empty = accept all, with a per-user warning).
+  allowed_slack_users: string[];
   allowed_paths: string[];
   max_sessions: number;
   idle_ms: number;
@@ -54,6 +62,30 @@ export interface MarsclawConfig {
   // Anthropic spend cap. The agent refuses to run new turns once today's
   // spend (USD, summed from SDKResultSuccess.total_cost_usd) crosses this.
   daily_usd_budget: number;
+  // When false (default), MCP tools that take outbound or mutating actions
+  // (gmail_send, sheets_write, calendar_create_event, and write-style *_raw
+  // calls) refuse to run. The agent reads untrusted content (email, web), so
+  // acting as the owner is opt-in. Set true to allow them. See lib/mutation-gate.ts.
+  allow_mutating_tools: boolean;
+  // When false (default), the chat agent has NO shell: the Bash tool is removed
+  // entirely (and denied as a backstop). A denylist can't make shell safe —
+  // `cat .e''nv`, `python -c`, `base64`, `security find-generic-password` all
+  // bypass any pattern set — so the only sound posture is to remove the
+  // capability. Enabling shell reopens credential/file exfiltration whenever
+  // the agent processes untrusted content. (Claude provider only; Gemini has
+  // no tools.)
+  allow_shell: boolean;
+  // When false (default), WebFetch/WebSearch are removed. With the agent
+  // reading untrusted email/web, an open fetch is an exfiltration channel
+  // (secrets encoded into a URL the agent retrieves). Enable to trade that
+  // egress risk for web access.
+  allow_web: boolean;
+  // Host allow-list for WebFetch when allow_web is true. Each entry matches
+  // exact host OR any subdomain ("wikipedia.org" covers en.wikipedia.org;
+  // "*.gov" covers every .gov sub). Empty list + allow_web=true means
+  // WebSearch works (search backend only) but no WebFetch will succeed —
+  // safe default. See lib/url-allowlist.ts.
+  allowed_web_domains: string[];
 }
 
 function defaults(): MarsclawConfig {
@@ -64,6 +96,8 @@ function defaults(): MarsclawConfig {
     whatsapp_pair_owner: false,
     whatsapp_pair_code: '',
     allowed_jids: [],
+    allowed_telegram_chats: [],
+    allowed_slack_users: [],
     allowed_paths: [process.cwd()],
     max_sessions: 20,
     idle_ms: 15 * 60_000,
@@ -80,6 +114,10 @@ function defaults(): MarsclawConfig {
     // total_cost_usd is informational only — no per-token billing — so the
     // budget check is auto-skipped regardless of this value.
     daily_usd_budget: 0,
+    allow_mutating_tools: false,
+    allow_shell: false,
+    allow_web: false,
+    allowed_web_domains: [],
   };
 }
 
@@ -133,6 +171,12 @@ export function loadConfig(): MarsclawConfig {
   const envJids = parseList(process.env.MARSCLAW_WHATSAPP_ALLOWED_JIDS);
   if (envJids !== undefined) cfg.allowed_jids = envJids;
 
+  const envTgChats = parseList(process.env.MARSCLAW_TELEGRAM_ALLOWED_CHATS);
+  if (envTgChats !== undefined) cfg.allowed_telegram_chats = envTgChats;
+
+  const envSlackUsers = parseList(process.env.MARSCLAW_SLACK_ALLOWED_USERS);
+  if (envSlackUsers !== undefined) cfg.allowed_slack_users = envSlackUsers;
+
   const envPaths = parseList(process.env.MARSCLAW_ALLOWED_PATHS);
   if (envPaths !== undefined) cfg.allowed_paths = envPaths;
 
@@ -166,6 +210,18 @@ export function loadConfig(): MarsclawConfig {
     const n = Number.parseFloat(envBudget);
     if (Number.isFinite(n) && n >= 0) cfg.daily_usd_budget = n;
   }
+
+  const envAllowMut = parseBool(process.env.MARSCLAW_ALLOW_MUTATING_TOOLS);
+  if (envAllowMut !== undefined) cfg.allow_mutating_tools = envAllowMut;
+
+  const envAllowShell = parseBool(process.env.MARSCLAW_ALLOW_SHELL);
+  if (envAllowShell !== undefined) cfg.allow_shell = envAllowShell;
+
+  const envAllowWeb = parseBool(process.env.MARSCLAW_ALLOW_WEB);
+  if (envAllowWeb !== undefined) cfg.allow_web = envAllowWeb;
+
+  const envWebDomains = parseList(process.env.MARSCLAW_ALLOWED_WEB_DOMAINS);
+  if (envWebDomains !== undefined) cfg.allowed_web_domains = envWebDomains;
 
   cached = Object.freeze(cfg);
   return cached;

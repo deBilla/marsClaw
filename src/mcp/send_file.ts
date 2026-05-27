@@ -11,6 +11,7 @@ import { existsSync, statSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { DB_PATH } from '../db/connection.ts';
 import { loadConfig } from '../lib/config.ts';
+import { isSensitivePath } from '../lib/sensitive-paths.ts';
 
 const THREAD_ID = process.env.MARSCLAW_THREAD_ID ?? '';
 const MAX_BYTES = 50 * 1024 * 1024; // 50 MB — WhatsApp's document limit is ~100MB
@@ -58,6 +59,16 @@ export const sendFileTool = {
     }
 
     const absPath = resolve(rawPath);
+    // Never deliver secrets or permission config into the chat (and thus into
+    // message history / backups), even though they live inside allowed_paths.
+    if (isSensitivePath(absPath)) {
+      return {
+        content: [
+          { type: 'text', text: `Error: ${absPath} holds secrets or config and cannot be sent.` },
+        ],
+        isError: true,
+      };
+    }
     const config = loadConfig();
     if (!isUnder(absPath, config.allowed_paths)) {
       return {

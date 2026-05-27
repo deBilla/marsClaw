@@ -3,6 +3,7 @@
 // Every tool accepts an optional `account` (alias from `marsclaw google list`).
 
 import { listRecent, search, getMessage, sendMessage, type MessageMeta } from '../google/gmail.ts';
+import { blockIfMutationsDisabled } from '../lib/mutation-gate.ts';
 
 function metaLine(m: MessageMeta): string {
   const date = m.date ? ` [${m.date}]` : '';
@@ -142,6 +143,8 @@ export const gmailSendTool = {
   },
 
   async handler(args: Record<string, unknown>) {
+    const blocked = blockIfMutationsDisabled('gmail_send');
+    if (blocked) return blocked;
     const to = asStringArray(args.to);
     const cc = asStringArray(args.cc);
     const bcc = asStringArray(args.bcc);
