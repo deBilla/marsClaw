@@ -53,21 +53,6 @@ function envHas(key: string): boolean {
   return re.test(readFileSync('.env', 'utf-8'));
 }
 
-// faster-whisper + kokoro-onnx only ship wheels for Python 3.11/3.12. Mirror
-// the authoritative check in tools/setup-voice.sh so the interactive flow can
-// warn early instead of kicking off a doomed ~600MB install.
-function findVoicePython(): string | null {
-  for (const cand of ['python3.12', 'python3.11', 'python3']) {
-    if (!which(cand)) continue;
-    const r = spawnSync(cand, ['-c', 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")'], {
-      encoding: 'utf-8',
-    });
-    const v = r.status === 0 ? r.stdout.trim() : '';
-    if (v === '3.11' || v === '3.12') return `${cand} (${v})`;
-  }
-  return null;
-}
-
 // Phone → digits only (country code + number, no + / spaces / dashes), the
 // shape WhatsApp uses in a @s.whatsapp.net JID.
 function normalizePhone(raw: string): string {
@@ -240,17 +225,12 @@ async function askChannels(currentVoice: boolean, currentPhone: string): Promise
   let voiceEnabled = await yesNo('  Enable voice?', voiceDefault);
 
   if (voiceEnabled) {
-    const venvExists = existsSync('tools/voice-env');
-    const py = findVoicePython();
-    if (venvExists) {
+    if (existsSync('tools/voice-env')) {
       ok('  Voice venv already present at tools/voice-env — skipping install.');
-    } else if (!py) {
-      warn('  Voice needs Python 3.11 or 3.12 (faster-whisper/kokoro-onnx don\'t support 3.13+).');
-      warn('  Install one (brew install python@3.12) then run `bun run voice install`.');
-      warn('  Continuing with voice OFF for now.');
-      voiceEnabled = false;
     } else {
-      info(`  Using ${py}. Running tools/setup-voice.sh (venv + model download)…`);
+      // setup-voice.sh self-installs a supported Python (3.11/3.12) + ffmpeg
+      // for the OS if missing, then builds the venv and caches models.
+      info('  Running tools/setup-voice.sh (installs Python/ffmpeg if needed + models)…');
       const r = spawnSync('bash', ['tools/setup-voice.sh'], { stdio: 'inherit' });
       if (r.status !== 0) {
         warn('  Voice install failed. Retry later with `bun run voice install`.');
