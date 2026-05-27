@@ -39,7 +39,12 @@ export interface NothingclawConfig {
   // leaks in the SDK subprocess / MCP child / third-party deps that idle
   // teardown alone can't catch on a chatty thread. 0 disables.
   max_session_age_ms: number;
+  // IANA timezone (e.g. "Asia/Colombo"). Injected into every agent turn so the
+  // assistant knows the user's *current* local time. Defaults to UTC.
   timezone: string;
+  // Free-text location (e.g. "Colombo, Sri Lanka"). Personalization context the
+  // agent can't infer on its own; surfaced alongside the time each turn.
+  location: string;
   voice_enabled: boolean;
   agent_provider: 'claude' | 'gemini';
   extra_bash_denylist: string[];
@@ -64,6 +69,7 @@ function defaults(): NothingclawConfig {
     idle_ms: 15 * 60_000,
     max_session_age_ms: 4 * 60 * 60_000,
     timezone: 'UTC',
+    location: '',
     voice_enabled: false,
     agent_provider: 'gemini',
     extra_bash_denylist: [],
@@ -141,6 +147,9 @@ export function loadConfig(): NothingclawConfig {
 
   const envTz = process.env.NOTHINGCLAW_TIMEZONE;
   if (envTz) cfg.timezone = envTz;
+
+  const envLocation = process.env.NOTHINGCLAW_LOCATION;
+  if (envLocation) cfg.location = envLocation;
 
   const envVoice = parseBool(process.env.NOTHINGCLAW_VOICE);
   if (envVoice !== undefined) cfg.voice_enabled = envVoice;

@@ -12,6 +12,8 @@ import type { Provider, ProviderName } from '../providers/types.ts';
 import { printBanner } from './branding.ts';
 import { writeAtomic } from '../lib/atomic.ts';
 import { loadConfig, writeConfig } from '../lib/config.ts';
+import { isValidTimezone } from '../lib/timezone.ts';
+import { isServiceLoaded, stopService, startService } from '../lib/launchd.ts';
 
 const rl = createInterface({ input: stdin, output: stdout });
 
@@ -82,8 +84,31 @@ async function askOwnerName(current: string): Promise<string> {
   return await ask('  Your name', current || undefined);
 }
 
+async function askLocationTimezone(
+  currentTz: string,
+  currentLocation: string,
+): Promise<{ timezone: string; location: string }> {
+  bold('3. Location & timezone');
+  info('So the assistant answers time/location-aware questions ("what\'s on my');
+  info('schedule today?") in YOUR local time instead of UTC.');
+
+  // Default to the host's timezone unless a non-UTC one is already configured.
+  const systemTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const tzDefault = currentTz && currentTz !== 'UTC' ? currentTz : systemTz;
+
+  let timezone = tzDefault;
+  while (true) {
+    timezone = await ask('  Timezone (IANA, e.g. Asia/Colombo)', tzDefault);
+    if (isValidTimezone(timezone)) break;
+    warn(`  "${timezone}" isn't a valid IANA timezone. Try e.g. Asia/Colombo, Europe/London, America/New_York.`);
+  }
+
+  const location = await ask('  Location (city, country — optional)', currentLocation || undefined);
+  return { timezone, location };
+}
+
 async function pickProviderInteractive(current: ProviderName): Promise<Provider> {
-  bold('3. Agent provider');
+  bold('4. Agent provider');
   info(`Current: ${current}`);
   info('  [g] Gemini CLI  (Google,    npm @google/gemini-cli)');
   info('  [c] Claude Code (Anthropic, npm @anthropic-ai/claude-code)');
@@ -97,7 +122,7 @@ async function pickProviderInteractive(current: ProviderName): Promise<Provider>
 }
 
 async function ensureProviderInstalled(p: Provider): Promise<void> {
-  bold(`4. Install ${p.bin}`);
+  bold(`5. Install ${p.bin}`);
   const found = which(p.bin);
   if (found) {
     ok(`Found: ${found}`);
@@ -131,7 +156,7 @@ function resetTerminal(): void {
 }
 
 async function triggerLogin(p: Provider): Promise<void> {
-  bold(`5. Log in to ${p.name}`);
+  bold(`6. Log in to ${p.name}`);
 
   if (p.isAuthed()) {
     ok('Already logged in.');
@@ -186,7 +211,7 @@ interface ChannelChoices {
 }
 
 async function askChannels(currentVoice: boolean, currentPhone: string): Promise<ChannelChoices> {
-  bold('6. WhatsApp + voice');
+  bold('7. WhatsApp + voice');
 
   const whatsappAlready = envHas('NOTHINGCLAW_WHATSAPP');
   info('Connects via Baileys (unofficial WhatsApp library) — QR scan from your phone.');
@@ -197,12 +222,12 @@ async function askChannels(currentVoice: boolean, currentPhone: string): Promise
   let ownerPhone = '';
   if (whatsappEnabled) {
     if (!whatsappAlready) {
-      info('  On first `bun run start`, a QR code prints in the terminal.');
+      info('  You\'ll scan a QR to link your phone in a moment (step 9).');
       info('  WhatsApp → Settings → Linked devices → Link a device → scan it.');
     }
     info('');
-    info('  Your WhatsApp number — include country code, e.g. +94771234567.');
-    info('  Only this number will be allowed to talk to the bot.');
+    info('  Your WhatsApp number — digits only, country code first, no "+".');
+    info('  e.g. 6591234567 (Singapore). Only this number can talk to the bot.');
     while (true) {
       const raw = await ask('  Your number', currentPhone || undefined);
       ownerPhone = normalizePhone(raw);
@@ -249,14 +274,21 @@ async function askChannels(currentVoice: boolean, currentPhone: string): Promise
 // Seed MEMORY.md with an owner block so BOTH providers (gemini reads MEMORY.md,
 // claude gets it via persona too) know who they're talking to from turn one.
 // Idempotent: only writes if the file lacks an "## Owner" section.
-function seedMemory(ownerName: string, ownerPhone: string): void {
-  if (!ownerName && !ownerPhone) return;
+function seedMemory(
+  ownerName: string,
+  ownerPhone: string,
+  timezone: string,
+  location: string,
+): void {
+  if (!ownerName && !ownerPhone && !location && (!timezone || timezone === 'UTC')) return;
   if (!existsSync('MEMORY.md')) return;
   const body = readFileSync('MEMORY.md', 'utf-8');
   if (/^##\s+Owner\b/m.test(body)) return;
   const lines = ['', '## Owner', ''];
   if (ownerName) lines.push(`- Name: ${ownerName}`);
-  if (ownerPhone) lines.push(`- WhatsApp: +${ownerPhone}`);
+  if (ownerPhone) lines.push(`- WhatsApp: ${ownerPhone}`);
+  if (location) lines.push(`- Location: ${location}`);
+  if (timezone && timezone !== 'UTC') lines.push(`- Timezone: ${timezone}`);
   lines.push('');
   writeAtomic('MEMORY.md', body.replace(/\n+$/, '') + '\n' + lines.join('\n'));
 }
@@ -280,13 +312,22 @@ function writeEnv(provider: ProviderName, whatsappEnabled: boolean): void {
   writeAtomic('.env', out);
 }
 
-function summarize(botName: string, ownerName: string, provider: ProviderName, ch: ChannelChoices): void {
+function summarize(
+  botName: string,
+  ownerName: string,
+  provider: ProviderName,
+  ch: ChannelChoices,
+  timezone: string,
+  location: string,
+): void {
   ok(`bot name:  ${botName}`);
   if (ownerName) ok(`your name: ${ownerName}`);
+  ok(`timezone:  ${timezone}`);
+  if (location) ok(`location:  ${location}`);
   ok(`provider:  ${provider}`);
   ok(`whatsapp:  ${ch.whatsappEnabled ? 'on' : 'off'}`);
   if (ch.whatsappEnabled) {
-    ok(`allowed:   ${ch.ownerPhone ? `+${ch.ownerPhone} (+ chat captured at pairing)` : 'any sender'}`);
+    ok(`allowed:   ${ch.ownerPhone ? `${ch.ownerPhone} (and the chat captured at pairing)` : 'any sender'}`);
   }
   ok(`voice:     ${ch.voiceEnabled ? 'on' : 'off'}`);
   if (!ch.whatsappEnabled) {
@@ -305,6 +346,7 @@ async function main(): Promise<void> {
 
   const botName = await askBotName(current.bot_name);
   const ownerName = await askOwnerName(current.owner_name);
+  const { timezone, location } = await askLocationTimezone(current.timezone, current.location);
   const provider = await pickProviderInteractive(current.agent_provider);
   await ensureProviderInstalled(provider);
   await triggerLogin(provider);
@@ -335,39 +377,115 @@ async function main(): Promise<void> {
     allowedJids = [`${channels.ownerPhone}@s.whatsapp.net`];
   }
 
-  bold('7. Writing config');
+  bold('8. Writing config');
   try {
     writeEnv(provider.name, channels.whatsappEnabled);
     writeConfig({
       bot_name: botName,
       owner_name: ownerName,
       owner_phone: channels.ownerPhone,
+      timezone,
+      location,
       agent_provider: provider.name,
       voice_enabled: channels.voiceEnabled,
       allowed_jids: allowedJids,
       whatsapp_pair_owner: pairOwner,
       whatsapp_pair_code: pairCode,
     });
-    seedMemory(ownerName, channels.ownerPhone);
+    seedMemory(ownerName, channels.ownerPhone, timezone, location);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to persist config: ${msg}`);
   }
   ok('.env (secrets) and data/config.json (runtime config) written.');
-  summarize(botName, ownerName, provider.name, channels);
+  summarize(botName, ownerName, provider.name, channels, timezone, location);
+
+  // Step 9: link WhatsApp now by scanning a QR, so onboarding finishes in one
+  // sitting instead of deferring the scan to the first `bun run start`.
+  let linkedNow = false;
+  if (channels.whatsappEnabled) {
+    bold('9. Link WhatsApp');
+    if (await yesNo('  Link your WhatsApp now by scanning a QR?', true)) {
+      info('  Opening a link session — a QR will appear shortly (≤2 min to scan)…');
+      try {
+        const { linkWhatsapp } = await import('../channels/whatsapp-link.ts');
+        const res = await linkWhatsapp({ timeoutMs: 120_000 });
+        if (res.status === 'already-linked') {
+          ok('  WhatsApp already linked — nothing to scan.');
+          linkedNow = true;
+        } else if (res.status === 'linked') {
+          ok('  WhatsApp linked.');
+          linkedNow = true;
+        } else if (res.status === 'timeout') {
+          warn('  Timed out waiting for the scan. A QR will print on first `bun run start`.');
+        } else {
+          warn(`  Linking failed (${res.detail ?? res.status}). A QR will print on first \`bun run start\`.`);
+        }
+      } catch (err) {
+        warn(`  Couldn't start the link session: ${err instanceof Error ? err.message : String(err)}`);
+        info('  No problem — a QR will print on first `bun run start`.');
+      }
+    } else {
+      info('  Skipped — a QR will print on first `bun run start`.');
+    }
+  }
 
   if (pairOwner && pairCode) {
     bold('Pair your WhatsApp');
-    info('1. Start the bot:  bun run start');
-    info('2. Scan the QR shown in the terminal to link WhatsApp.');
-    info('3. From your phone, send this exact message to the bot:');
+    if (!linkedNow) info('Scan the QR the bot prints on start to link your phone, then:');
+    info('From your phone, send this exact message to your bot once you see');
+    info('"whatsapp connected" in the logs below:');
     console.log(`\n      \x1b[1m${pairCode}\x1b[0m\n`);
-    info('   The bot stays silent until it sees that code, then locks to your chat.');
+    info('The bot stays silent until it sees that code, then locks to your chat.');
   }
 
+  // Offer to launch the bot right away. For WhatsApp this is the step that
+  // actually captures the pairing code — the bot must be running and connected
+  // to receive it. (If you run nothingClaw as a service, decline this and use
+  // `bun run service restart` instead to avoid two instances.)
   bold('Done.');
-  info('Start the bot:  bun run start');
+  const startNow =
+    channels.whatsappEnabled && (await yesNo('Start the bot now to finish pairing?', true));
   rl.close();
+
+  if (startNow) {
+    // If a background launchd service is already running, stop it first — two
+    // instances against the same WhatsApp auth dir conflict (connection
+    // cycling). We restore it after the foreground pairing session ends.
+    const serviceWasRunning = isServiceLoaded();
+    if (serviceWasRunning) {
+      info('A background service is running — stopping it so the two don\'t clash…');
+      const stopped = stopService();
+      if (stopped.ok) ok('  Background service stopped.');
+      else warn(`  Couldn't stop it${stopped.reason ? ` (${stopped.reason})` : ''} — watch for connection cycling.`);
+      info('  When pairing is done, Ctrl+C — I\'ll bring the service back (else: bun run service start).');
+    }
+
+    info('Starting nothingClaw — press Ctrl+C when pairing is done.\n');
+    // Ignore Ctrl+C in this parent so the child (bot) owns it; we resume after
+    // it exits to restore the service. Without this, SIGINT would also kill
+    // setup before it could restart the service.
+    const ignoreSigint = (): void => {};
+    process.on('SIGINT', ignoreSigint);
+    // Reuse the bun binary running setup (robust if `bun` isn't on a minimal
+    // PATH). Foreground + inherited stdio so the "connected" log + pairing code
+    // show and the code message is captured live in the same terminal.
+    const r = spawnSync(process.execPath, ['run', 'src/cli/index.ts', 'start'], { stdio: 'inherit' });
+    process.off('SIGINT', ignoreSigint);
+
+    if (serviceWasRunning) {
+      info('\nRestoring the background service…');
+      const restarted = startService();
+      if (restarted.ok) ok('  Background service is running again.');
+      else warn(`  Couldn't restart it${restarted.reason ? ` (${restarted.reason})` : ''}. Run: bun run service start`);
+    }
+    process.exit(r.status ?? 0);
+  }
+
+  info('Start the bot:  bun run start');
+  // Baileys may leave a socket/timer pending even after sock.end(); force a
+  // clean exit so setup doesn't hang after linking.
+  process.exit(0);
 }
 
 main().catch((e) => {

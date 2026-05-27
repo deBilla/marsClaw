@@ -7,14 +7,21 @@ import { runClaudeSdk } from './providers/claude-sdk.ts';
 import { ClaudeHardError } from './providers/claude-error.ts';
 import { startTypingRefresh, stopTypingRefresh, pauseTypingAfterDelivery } from './lib/typing.ts';
 import { log } from './lib/log.ts';
+import { loadConfig } from './lib/config.ts';
+import { buildTurnContext } from './lib/turn-context.ts';
 
 const provider = pickProvider();
+const config = loadConfig();
 const PROJECT_ROOT = process.cwd();
 const HISTORY_TURNS = 20;
 const AGENT_TIMEOUT_MS = Number(process.env.NOTHINGCLAW_AGENT_TIMEOUT_MS ?? 300_000);
 
-function buildPrompt(history: HistoryRow[], userText: string): string {
+function buildPrompt(history: HistoryRow[], userText: string, context: string): string {
   const lines: string[] = [];
+  if (context) {
+    lines.push(context);
+    lines.push('');
+  }
   if (history.length) {
     lines.push('## Recent conversation');
     for (const m of history) {
@@ -37,6 +44,11 @@ export async function handleMessage(
 ): Promise<void> {
   appendMessage(db, threadId, 'user', userText);
 
+  // Ambient per-turn context (current local time, timezone, location). Built
+  // fresh each message so the agent always knows "now" and where the user is.
+  // Stored history stays raw — we only decorate what's sent to the provider.
+  const context = buildTurnContext(config);
+
   // Begin the "typing…" indicator. The refresher fires every 4s while the
   // agent's heartbeat is fresh, so the user sees activity even on long turns.
   startTypingRefresh(threadId, channel);
@@ -45,9 +57,10 @@ export async function handleMessage(
     let response: string;
     if (provider.name === 'claude') {
       // SDK path: session resume keeps the transcript on disk; we only send the
-      // new user message. Sqlite history is still appended for /status etc.
+      // new user message (prefixed with ambient context). Sqlite history is
+      // still appended for /status etc.
       try {
-        response = await runClaudeSdk(db, threadId, userText, AGENT_TIMEOUT_MS);
+        response = await runClaudeSdk(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS);
       } catch (err) {
         if (err instanceof ClaudeHardError && PROVIDERS.gemini.isAuthed()) {
           // Claude is out of quota or auth-broken; fall back to Gemini for
@@ -58,7 +71,7 @@ export async function handleMessage(
             kind: err.kind,
           });
           const history = loadHistory(db, threadId, HISTORY_TURNS);
-          const prompt = buildPrompt(history, userText);
+          const prompt = buildPrompt(history, userText, context);
           response = await runProviderWith(PROVIDERS.gemini, prompt, threadId);
         } else if (err instanceof ClaudeHardError) {
           // No failover available — surface the friendly string.
@@ -70,7 +83,7 @@ export async function handleMessage(
     } else {
       // Gemini path: no session concept — pass recent history via the prompt.
       const history = loadHistory(db, threadId, HISTORY_TURNS);
-      const prompt = buildPrompt(history, userText);
+      const prompt = buildPrompt(history, userText, context);
       response = await runProvider(prompt, threadId);
     }
 

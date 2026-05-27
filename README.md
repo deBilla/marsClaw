@@ -36,17 +36,19 @@ bash setup.sh
 
 Setup walks you through:
 
-1. **Pick an agent CLI.** Gemini CLI or Claude Code — auto-installs from npm if missing.
-2. **One-time browser login.** Auto-detected and skipped if you're already authed.
-3. **Connect channels.** Telegram, Slack, WhatsApp — any combination, all optional.
+1. **Your name, location & timezone.** Lets the agent answer time/location-aware questions ("what's on my schedule today?") in your local time instead of UTC.
+2. **Pick an agent CLI.** Gemini CLI or Claude Code — auto-installs from npm if missing.
+3. **One-time browser login.** Auto-detected and skipped if you're already authed.
+4. **Connect channels.** Telegram, Slack, WhatsApp — any combination, all optional.
+5. **Link WhatsApp.** Scan the QR right in the setup flow — no need to start the bot first.
 
-Then run the bot:
+At the end, setup offers to **start the bot for you** so the WhatsApp pairing code is captured live — just send the code it prints from your phone. To start it yourself later:
 
 ```bash
 bun run start
 ```
 
-For WhatsApp on first start, scan the QR code printed in the terminal:
+If WhatsApp wasn't linked during setup, scan the QR printed on start:
 **WhatsApp on phone → Settings → Linked devices → Link a device**.
 
 ## Commands
@@ -176,7 +178,7 @@ Whisper defaults to `base` (~150MB, good for English + accents). Override with `
 | `TELEGRAM_BOT_TOKEN` | per-channel | From [@BotFather](https://t.me/BotFather) |
 | `SLACK_BOT_TOKEN` | per-channel | `xoxb-…` |
 | `SLACK_APP_TOKEN` | per-channel | `xapp-…` (needs `connections:write`) |
-| `NOTHINGCLAW_WHATSAPP` | per-channel | Set to `1`; auth via QR on first start |
+| `NOTHINGCLAW_WHATSAPP` | per-channel | Set to `1`; auth via QR (scanned during setup, or on first start) |
 | `NOTHINGCLAW_VOICE` | per-feature | Set to `1` to enable Whisper STT + Kokoro TTS (sidecars must be running) |
 | `WHISPER_URL` | optional | Whisper sidecar URL (default `http://127.0.0.1:9000`) |
 | `WHISPER_MODEL` | optional | `tiny` / `base` / `small` / `medium` / `large` (default `base`) |
@@ -184,6 +186,8 @@ Whisper defaults to `base` (~150MB, good for English + accents). Override with `
 | `KOKORO_VOICE` | optional | Default voice (`af_heart`, `af_bella`, `am_adam`, …) |
 | `KOKORO_FORMAT` | optional | `ogg` (proper voice note) / `mp3` / `wav` |
 | `GEMINI_API_KEY` | optional | Use a paid key instead of OAuth (higher quota) |
+| `NOTHINGCLAW_TIMEZONE` | optional | IANA tz (e.g. `Asia/Colombo`) — the agent's "now". Prompted at setup; default `UTC` |
+| `NOTHINGCLAW_LOCATION` | optional | Free-text location for personalization (e.g. `Colombo, Sri Lanka`) |
 | `NOTHINGCLAW_AGENT_TIMEOUT_MS` | optional | Per-message timeout (default `120000`) |
 | `NOTHINGCLAW_WHATSAPP_VERBOSE` | optional | Set to `1` to dump Baileys protocol logs |
 

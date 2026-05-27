@@ -193,6 +193,15 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
           log.debug('failed to clear reauth marker', { err });
         }
         log.info('whatsapp connected');
+        // If owner-pairing is still armed, surface the code right here — this
+        // is exactly when the operator is watching the logs (e.g. setup just
+        // auto-started the bot). They send this code from their phone to lock
+        // the allow-list to their chat.
+        if (pairOwner && pairCode) {
+          log.warn('whatsapp pairing armed — send this code from your phone to finish pairing', {
+            code: pairCode,
+          });
+        }
       }
       if (u.connection === 'close') {
         const code = (u.lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
