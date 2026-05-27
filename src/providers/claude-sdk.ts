@@ -20,6 +20,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { getThreadSession, setThreadSession, clearThreadSession } from '../db/sessions.ts';
+import { loadHistory } from '../db/messages.ts';
 import { log } from '../lib/log.ts';
 import { loadConfig } from '../lib/config.ts';
 import { touchHeartbeat } from '../lib/heartbeat.ts';
@@ -476,6 +477,26 @@ const sweepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
 // Don't keep the event loop alive just for the sweeper.
 sweepTimer.unref?.();
 
+// On the first turn of a fresh claude session, fold prior sqlite history into
+// the user message so cross-provider continuity is preserved. The current
+// user message has already been appended to sqlite by handleMessage, so we
+// drop the trailing row to avoid duplicating it.
+const SEED_TURNS = 20;
+function prependHistory(db: Database, threadId: string, userText: string): string {
+  const rows = loadHistory(db, threadId, SEED_TURNS + 1);
+  const prior = rows.length > 0 && rows[rows.length - 1]?.role === 'user' ? rows.slice(0, -1) : rows;
+  if (prior.length === 0) return userText;
+  const lines: string[] = [
+    '[Conversation history from a previous session — context only, do not respond to old messages.]',
+    '',
+  ];
+  for (const m of prior) {
+    lines.push(`${m.role === 'user' ? 'User' : 'You'}: ${m.text}`);
+  }
+  lines.push('', '[End history.]', '');
+  return `${lines.join('\n')}${userText}`;
+}
+
 export async function runClaudeSdk(
   db: Database,
   threadId: string,
@@ -516,15 +537,24 @@ async function runClaudeSdkInner(
     session = undefined;
   }
   const isNew = !session;
+  let firstTurnText = userText;
   if (!session) {
     evictLruIfFull();
     const prior = getThreadSession(db, threadId, PROVIDER_NAME);
     session = new ClaudeSession(threadId, prior, db);
     sessions.set(threadId, session);
+    // No resumable claude transcript on disk → seed with sqlite history so a
+    // provider switch (e.g. gemini → claude) doesn't lose conversation memory.
+    // Costs one extra few-K-token request on the first turn after a switch;
+    // subsequent turns resume via the SDK's own transcript at no extra cost.
+    if (!prior) {
+      firstTurnText = prependHistory(db, threadId, userText);
+    }
     log.info('claude session start', {
       thread: threadId,
       resume: prior ? prior.slice(0, 8) : null,
       activeSessions: sessions.size,
+      seeded: !prior && firstTurnText !== userText,
     });
   } else {
     touchLru(threadId, session);
@@ -532,7 +562,7 @@ async function runClaudeSdkInner(
   }
 
   try {
-    const text = await session.send(userText, timeoutMs);
+    const text = await session.send(firstTurnText, timeoutMs);
     const sid = session.getSessionId();
     if (sid) setThreadSession(db, threadId, PROVIDER_NAME, sid);
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
