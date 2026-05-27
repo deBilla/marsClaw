@@ -17,13 +17,28 @@ err()  { printf "\033[31m✗\033[0m %s\n" "$1" >&2; }
 bold "nothingClaw voice — Whisper installer"
 echo
 
-# Python
-if ! command -v python3 >/dev/null 2>&1; then
-  err "python3 not found. Install Python 3.10+ (brew install python@3.11 / apt install python3)."
+# Python — faster-whisper + kokoro-onnx (onnxruntime) only ship wheels for
+# 3.11 and 3.12. 3.13+ and ≤3.10 fail to install, so we require an exact match.
+py_ver() { "$1" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null; }
+is_supported() { case "$1" in 3.11|3.12) return 0 ;; *) return 1 ;; esac; }
+
+PYTHON_BIN=""
+for cand in python3.12 python3.11 python3; do
+  command -v "$cand" >/dev/null 2>&1 || continue
+  v="$(py_ver "$cand")"
+  if is_supported "$v"; then PYTHON_BIN="$cand"; PY_VER="$v"; break; fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+  err "Voice needs Python 3.11 or 3.12 (faster-whisper/kokoro-onnx don't support 3.13+ or ≤3.10)."
+  err "Install one and re-run:"
+  err "  macOS:         brew install python@3.12"
+  err "  Debian/Ubuntu: sudo apt install python3.12 python3.12-venv"
+  found="$(command -v python3 >/dev/null 2>&1 && py_ver python3 || echo none)"
+  err "Detected default python3: ${found}"
   exit 1
 fi
-PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
-ok "python3: $PY_VER"
+ok "python: $PYTHON_BIN ($PY_VER)"
 
 # ffmpeg (needed by faster-whisper to decode opus/ogg from WhatsApp)
 if ! command -v ffmpeg >/dev/null 2>&1; then
@@ -33,9 +48,16 @@ fi
 ok "ffmpeg: $(ffmpeg -version | head -1 | awk '{print $3}')"
 
 # venv
-if [ ! -d "$VENV_DIR" ]; then
-  bold "Creating Python venv at $VENV_DIR"
-  python3 -m venv "$VENV_DIR"
+if [ -d "$VENV_DIR" ]; then
+  EXISTING_VER="$(py_ver "$VENV_DIR/bin/python")"
+  if ! is_supported "$EXISTING_VER"; then
+    err "Existing venv at $VENV_DIR uses Python ${EXISTING_VER:-unknown}, which is unsupported."
+    err "Delete it and re-run:  rm -rf $VENV_DIR && bun run voice install"
+    exit 1
+  fi
+else
+  bold "Creating Python venv at $VENV_DIR (using $PYTHON_BIN)"
+  "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 ok "venv: $VENV_DIR"
 

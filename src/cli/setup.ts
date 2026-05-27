@@ -3,6 +3,7 @@
 // as defaults.
 
 import { existsSync, readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -52,6 +53,37 @@ function envHas(key: string): boolean {
   return re.test(readFileSync('.env', 'utf-8'));
 }
 
+// faster-whisper + kokoro-onnx only ship wheels for Python 3.11/3.12. Mirror
+// the authoritative check in tools/setup-voice.sh so the interactive flow can
+// warn early instead of kicking off a doomed ~600MB install.
+function findVoicePython(): string | null {
+  for (const cand of ['python3.12', 'python3.11', 'python3']) {
+    if (!which(cand)) continue;
+    const r = spawnSync(cand, ['-c', 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")'], {
+      encoding: 'utf-8',
+    });
+    const v = r.status === 0 ? r.stdout.trim() : '';
+    if (v === '3.11' || v === '3.12') return `${cand} (${v})`;
+  }
+  return null;
+}
+
+// Phone → digits only (country code + number, no + / spaces / dashes), the
+// shape WhatsApp uses in a @s.whatsapp.net JID.
+function normalizePhone(raw: string): string {
+  return raw.replace(/\D/g, '');
+}
+
+// A short, unambiguous pairing code the owner sends as a WhatsApp message to
+// complete pairing. Alphabet omits 0/O/1/I/L to avoid typos on a phone.
+function genPairCode(): string {
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const bytes = randomBytes(6);
+  let s = '';
+  for (let i = 0; i < 6; i++) s += alphabet[bytes[i] % alphabet.length];
+  return `link-${s}`;
+}
+
 async function askBotName(current: string): Promise<string> {
   bold('1. Bot name');
   info('The persona name your bot uses when chatting.');
@@ -59,8 +91,14 @@ async function askBotName(current: string): Promise<string> {
   return name || current;
 }
 
+async function askOwnerName(current: string): Promise<string> {
+  bold('2. Your name');
+  info('What should the bot call you? It uses this to address you.');
+  return await ask('  Your name', current || undefined);
+}
+
 async function pickProviderInteractive(current: ProviderName): Promise<Provider> {
-  bold('2. Agent provider');
+  bold('3. Agent provider');
   info(`Current: ${current}`);
   info('  [g] Gemini CLI  (Google,    npm @google/gemini-cli)');
   info('  [c] Claude Code (Anthropic, npm @anthropic-ai/claude-code)');
@@ -74,7 +112,7 @@ async function pickProviderInteractive(current: ProviderName): Promise<Provider>
 }
 
 async function ensureProviderInstalled(p: Provider): Promise<void> {
-  bold(`3. Install ${p.bin}`);
+  bold(`4. Install ${p.bin}`);
   const found = which(p.bin);
   if (found) {
     ok(`Found: ${found}`);
@@ -108,7 +146,7 @@ function resetTerminal(): void {
 }
 
 async function triggerLogin(p: Provider): Promise<void> {
-  bold(`4. Log in to ${p.name}`);
+  bold(`5. Log in to ${p.name}`);
 
   if (p.isAuthed()) {
     ok('Already logged in.');
@@ -158,44 +196,89 @@ async function triggerLogin(p: Provider): Promise<void> {
 
 interface ChannelChoices {
   whatsappEnabled: boolean;
+  ownerPhone: string;
   voiceEnabled: boolean;
 }
 
-async function askChannels(currentVoice: boolean): Promise<ChannelChoices> {
-  bold('5. WhatsApp + voice');
+async function askChannels(currentVoice: boolean, currentPhone: string): Promise<ChannelChoices> {
+  bold('6. WhatsApp + voice');
 
   const whatsappAlready = envHas('NOTHINGCLAW_WHATSAPP');
   info('Connects via Baileys (unofficial WhatsApp library) — QR scan from your phone.');
   if (whatsappAlready) info('  Currently enabled in .env.');
   warn('Unofficial: not endorsed by Meta. Use at your own risk.');
   const whatsappEnabled = await yesNo('  Enable WhatsApp?', true);
-  if (whatsappEnabled && !whatsappAlready) {
-    info('  On first `bun run start`, a QR code prints in the terminal.');
-    info('  WhatsApp → Settings → Linked devices → Link a device → scan it.');
+
+  let ownerPhone = '';
+  if (whatsappEnabled) {
+    if (!whatsappAlready) {
+      info('  On first `bun run start`, a QR code prints in the terminal.');
+      info('  WhatsApp → Settings → Linked devices → Link a device → scan it.');
+    }
+    info('');
+    info('  Your WhatsApp number — include country code, e.g. +94771234567.');
+    info('  Only this number will be allowed to talk to the bot.');
+    while (true) {
+      const raw = await ask('  Your number', currentPhone || undefined);
+      ownerPhone = normalizePhone(raw);
+      if (!ownerPhone) {
+        if (await yesNo('  No number given — accept messages from ANY sender?', false)) break;
+        continue;
+      }
+      if (ownerPhone.length < 7 || ownerPhone.length > 15) {
+        warn('  That doesn\'t look like a full international number (7–15 digits). Try again.');
+        continue;
+      }
+      break;
+    }
   }
 
   info('');
   info('Voice transcription (local Whisper, ~600MB one-time install).');
   if (currentVoice) info('  Currently enabled in config.');
   const voiceDefault = currentVoice || whatsappEnabled;
-  const voiceEnabled = await yesNo('  Enable voice?', voiceDefault);
+  let voiceEnabled = await yesNo('  Enable voice?', voiceDefault);
 
-  const venvExists = existsSync('tools/voice-env');
-  if (voiceEnabled && !venvExists) {
-    info('  Installing — running tools/setup-voice.sh (Python venv + model download).');
-    const r = spawnSync('bash', ['tools/setup-voice.sh'], { stdio: 'inherit' });
-    if (r.status !== 0) {
-      warn('  Voice install failed. Retry later with `bun run voice install`.');
+  if (voiceEnabled) {
+    const venvExists = existsSync('tools/voice-env');
+    const py = findVoicePython();
+    if (venvExists) {
+      ok('  Voice venv already present at tools/voice-env — skipping install.');
+    } else if (!py) {
+      warn('  Voice needs Python 3.11 or 3.12 (faster-whisper/kokoro-onnx don\'t support 3.13+).');
+      warn('  Install one (brew install python@3.12) then run `bun run voice install`.');
+      warn('  Continuing with voice OFF for now.');
+      voiceEnabled = false;
     } else {
-      ok('  Voice installed.');
-      const s = spawnSync('bun', ['run', 'src/cli/index.ts', 'voice', 'start'], { stdio: 'inherit' });
-      if (s.status !== 0) warn('  Could not start sidecar automatically; run `bun run voice start` later.');
+      info(`  Using ${py}. Running tools/setup-voice.sh (venv + model download)…`);
+      const r = spawnSync('bash', ['tools/setup-voice.sh'], { stdio: 'inherit' });
+      if (r.status !== 0) {
+        warn('  Voice install failed. Retry later with `bun run voice install`.');
+        voiceEnabled = false;
+      } else {
+        ok('  Voice installed.');
+        const s = spawnSync('bun', ['run', 'src/cli/index.ts', 'voice', 'start'], { stdio: 'inherit' });
+        if (s.status !== 0) warn('  Could not start sidecar automatically; run `bun run voice start` later.');
+      }
     }
-  } else if (voiceEnabled && venvExists) {
-    ok('  Voice venv already present at tools/voice-env — skipping install.');
   }
 
-  return { whatsappEnabled, voiceEnabled };
+  return { whatsappEnabled, ownerPhone, voiceEnabled };
+}
+
+// Seed MEMORY.md with an owner block so BOTH providers (gemini reads MEMORY.md,
+// claude gets it via persona too) know who they're talking to from turn one.
+// Idempotent: only writes if the file lacks an "## Owner" section.
+function seedMemory(ownerName: string, ownerPhone: string): void {
+  if (!ownerName && !ownerPhone) return;
+  if (!existsSync('MEMORY.md')) return;
+  const body = readFileSync('MEMORY.md', 'utf-8');
+  if (/^##\s+Owner\b/m.test(body)) return;
+  const lines = ['', '## Owner', ''];
+  if (ownerName) lines.push(`- Name: ${ownerName}`);
+  if (ownerPhone) lines.push(`- WhatsApp: +${ownerPhone}`);
+  lines.push('');
+  writeAtomic('MEMORY.md', body.replace(/\n+$/, '') + '\n' + lines.join('\n'));
 }
 
 // .env holds secrets + channel-enable flags. Non-secret runtime config
@@ -217,10 +300,14 @@ function writeEnv(provider: ProviderName, whatsappEnabled: boolean): void {
   writeAtomic('.env', out);
 }
 
-function summarize(botName: string, provider: ProviderName, ch: ChannelChoices): void {
-  ok(`name:      ${botName}`);
+function summarize(botName: string, ownerName: string, provider: ProviderName, ch: ChannelChoices): void {
+  ok(`bot name:  ${botName}`);
+  if (ownerName) ok(`your name: ${ownerName}`);
   ok(`provider:  ${provider}`);
   ok(`whatsapp:  ${ch.whatsappEnabled ? 'on' : 'off'}`);
+  if (ch.whatsappEnabled) {
+    ok(`allowed:   ${ch.ownerPhone ? `+${ch.ownerPhone} (+ chat captured at pairing)` : 'any sender'}`);
+  }
   ok(`voice:     ${ch.voiceEnabled ? 'on' : 'off'}`);
   if (!ch.whatsappEnabled) {
     warn('No channels enabled. The bot will refuse to start until you wire one up.');
@@ -237,25 +324,66 @@ async function main(): Promise<void> {
   const current = loadConfig();
 
   const botName = await askBotName(current.bot_name);
+  const ownerName = await askOwnerName(current.owner_name);
   const provider = await pickProviderInteractive(current.agent_provider);
   await ensureProviderInstalled(provider);
   await triggerLogin(provider);
-  const channels = await askChannels(current.voice_enabled);
+  const channels = await askChannels(current.voice_enabled, current.owner_phone);
 
-  bold('6. Writing .env and data/config.json');
+  // Allow-list + pairing. A fresh number arms code-based pairing: the owner
+  // sends a one-time code as a WhatsApp message and the bot captures that
+  // sender's real JID (possibly an @lid). Re-running with the SAME number
+  // preserves an already-paired JID and its pairing state/code.
+  let allowedJids: string[] = [];
+  let pairOwner = false;
+  let pairCode = '';
+  if (channels.whatsappEnabled && channels.ownerPhone) {
+    const phoneJid = `${channels.ownerPhone}@s.whatsapp.net`;
+    if (channels.ownerPhone !== current.owner_phone) {
+      allowedJids = [phoneJid];
+      pairOwner = true;
+      pairCode = genPairCode();
+    } else {
+      allowedJids = current.allowed_jids.includes(phoneJid)
+        ? [...current.allowed_jids]
+        : [phoneJid, ...current.allowed_jids];
+      pairOwner = current.whatsapp_pair_owner;
+      pairCode = current.whatsapp_pair_code;
+      if (pairOwner && !pairCode) pairCode = genPairCode(); // arm if missing
+    }
+  } else if (channels.ownerPhone) {
+    allowedJids = [`${channels.ownerPhone}@s.whatsapp.net`];
+  }
+
+  bold('7. Writing config');
   try {
     writeEnv(provider.name, channels.whatsappEnabled);
     writeConfig({
       bot_name: botName,
+      owner_name: ownerName,
+      owner_phone: channels.ownerPhone,
       agent_provider: provider.name,
       voice_enabled: channels.voiceEnabled,
+      allowed_jids: allowedJids,
+      whatsapp_pair_owner: pairOwner,
+      whatsapp_pair_code: pairCode,
     });
+    seedMemory(ownerName, channels.ownerPhone);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to persist config: ${msg}`);
   }
   ok('.env (secrets) and data/config.json (runtime config) written.');
-  summarize(botName, provider.name, channels);
+  summarize(botName, ownerName, provider.name, channels);
+
+  if (pairOwner && pairCode) {
+    bold('Pair your WhatsApp');
+    info('1. Start the bot:  bun run start');
+    info('2. Scan the QR shown in the terminal to link WhatsApp.');
+    info('3. From your phone, send this exact message to the bot:');
+    console.log(`\n      \x1b[1m${pairCode}\x1b[0m\n`);
+    info('   The bot stays silent until it sees that code, then locks to your chat.');
+  }
 
   bold('Done.');
   info('Start the bot:  bun run start');

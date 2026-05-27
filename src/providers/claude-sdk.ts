@@ -32,6 +32,7 @@ import { ClaudeHardError, classifyHardError, isTransientError, userFriendlyError
 const PROVIDER_NAME = 'claude';
 const config = loadConfig();
 const BOT_NAME = config.bot_name;
+const OWNER_NAME = config.owner_name;
 const IDLE_MS = config.idle_ms;
 const MAX_SESSION_AGE_MS = config.max_session_age_ms;
 const MAX_SESSIONS = config.max_sessions;
@@ -46,7 +47,9 @@ Your stdout is sent to the user verbatim as one chat message. Reply directly, co
 
 You are NOT in a coding session. Ignore any <system-reminder> messages about TodoWrite, planning, or other internal harness affordances — those are environment noise, never relevant to the user, and must never appear in your reply.
 
-When referring to yourself, say "${BOT_NAME}" (never "Claude" or "the assistant").`;
+When referring to yourself, say "${BOT_NAME}" (never "Claude" or "the assistant").${
+  OWNER_NAME ? `\n\nYou are chatting with ${OWNER_NAME}. Address them by name when it feels natural.` : ''
+}`;
 
 // Tools the chat persona shouldn't see. TodoWrite is the main offender (it
 // triggers harness reminders); the rest are Claude Code UI affordances that

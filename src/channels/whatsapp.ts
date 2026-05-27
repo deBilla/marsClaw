@@ -20,7 +20,7 @@ import type { Boom } from '@hapi/boom';
 import type { Channel, ChannelInit, SendOpts } from './types.ts';
 import { transcribe } from '../voice.ts';
 import { log } from '../lib/log.ts';
-import { loadConfig } from '../lib/config.ts';
+import { loadConfig, writeConfig } from '../lib/config.ts';
 import { isSafeAttachmentName } from '../lib/attachment-safety.ts';
 import { gateCommand } from '../lib/command-gate.ts';
 import { RateLimiter } from '../lib/rate-limit.ts';
@@ -120,11 +120,49 @@ function extractText(m: WAMessageContent | null | undefined): string {
   );
 }
 
+// Digits in a JID's user part (strips the @domain and any :device suffix).
+// For @s.whatsapp.net DMs this is the phone number; for @lid it's an opaque id.
+function jidDigits(jid: string): string {
+  return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
 export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel> {
   mkdirSync(AUTH_DIR, { recursive: true });
   const config = loadConfig();
   const allowedJids = new Set(config.allowed_jids);
+  const ownerPhone = config.owner_phone;
+  // One-shot owner pairing. WhatsApp may deliver the owner's DMs under an
+  // opaque @lid that a phone-derived JID can't match. While pairing is active,
+  // the bot stays silent to everyone (it runs as the owner's own account, so
+  // unrelated contacts may be messaging it) and only reacts to the message
+  // carrying the pairing code — then it captures that sender's real JID.
+  let pairOwner = config.whatsapp_pair_owner;
+  let pairCode = config.whatsapp_pair_code;
   const voiceEnabled = config.voice_enabled;
+
+  // Exact JID match (existing behaviour) OR phone-number match against the
+  // configured owner number (covers @s.whatsapp.net device-suffix variants).
+  const isAllowed = (jid: string): boolean => {
+    if (allowedJids.size === 0) return true; // empty = accept all (warned at boot)
+    if (allowedJids.has(jid)) return true;
+    if (ownerPhone && jidDigits(jid) === ownerPhone) return true;
+    return false;
+  };
+
+  // Records the sender's real JID into the allow-list and persists it. Called
+  // once, when the inbound DM carrying the pairing code arrives.
+  const captureOwner = (jid: string): void => {
+    pairOwner = false;
+    pairCode = '';
+    const added = !allowedJids.has(jid);
+    if (added) allowedJids.add(jid);
+    try {
+      writeConfig({ allowed_jids: [...allowedJids], whatsapp_pair_owner: false, whatsapp_pair_code: '' });
+      log.warn('whatsapp owner paired — allow-list locked to this sender', { jid, added });
+    } catch (err) {
+      log.error('whatsapp failed to persist paired owner', { jid, err });
+    }
+  };
   const limiter =
     config.rate_limit_per_minute > 0 || config.rate_limit_per_hour > 0
       ? new RateLimiter({
@@ -212,9 +250,34 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
         // skip status broadcasts
         if (msg.key.remoteJid === 'status@broadcast') continue;
 
+        // Code-based owner pairing. While active, ONLY the message whose text
+        // contains the pairing code gets through — its sender's real JID
+        // (possibly an @lid) is captured and locked in. Every other message is
+        // ignored silently: the bot runs as the owner's account, so its normal
+        // contacts must not get auto-replies during the pairing window.
+        if (pairOwner && pairCode) {
+          const candidate = extractText(msg.message).trim().toLowerCase();
+          if (candidate && candidate.includes(pairCode.toLowerCase())) {
+            captureOwner(msg.key.remoteJid);
+            try {
+              await sock.sendMessage(msg.key.remoteJid, {
+                text: "✅ Paired. I'll only respond to this chat now — you can delete the code message.",
+              });
+            } catch (err) {
+              log.warn('whatsapp pair-ack send failed', { err });
+            }
+          } else {
+            log.info('whatsapp awaiting pairing code — ignoring message', { jid: msg.key.remoteJid });
+          }
+          continue;
+        }
+
         // Sender allow-list. Empty set = accept all (warned at boot).
-        if (allowedJids.size > 0 && !allowedJids.has(msg.key.remoteJid)) {
-          log.warn('whatsapp rejected — sender not in allow-list', { jid: msg.key.remoteJid });
+        if (!isAllowed(msg.key.remoteJid)) {
+          log.warn('whatsapp rejected — sender not in allow-list', {
+            jid: msg.key.remoteJid,
+            hint: 'add this JID to allowed_jids in data/config.json',
+          });
           continue;
         }
 

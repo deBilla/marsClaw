@@ -17,6 +17,20 @@ export const CONFIG_PATH = process.env.NOTHINGCLAW_CONFIG ?? 'data/config.json';
 
 export interface NothingclawConfig {
   bot_name: string;
+  // What the assistant calls its human (the operator). Injected into the
+  // chat persona and seeded into MEMORY.md at setup.
+  owner_name: string;
+  // The operator's WhatsApp number, digits only (country code + number, no +).
+  // Used for the allow-list and as identity context.
+  owner_phone: string;
+  // One-shot pairing flag. While true, an inbound WhatsApp DM whose text
+  // matches whatsapp_pair_code has its real JID captured into allowed_jids
+  // (handles WhatsApp's opaque @lid that a phone-derived JID can't match),
+  // then this flips false. See whatsapp.ts.
+  whatsapp_pair_owner: boolean;
+  // The code the owner must send as a WhatsApp message to complete pairing.
+  // Cleared once paired. Only meaningful while whatsapp_pair_owner is true.
+  whatsapp_pair_code: string;
   allowed_jids: string[];
   allowed_paths: string[];
   max_sessions: number;
@@ -40,6 +54,10 @@ export interface NothingclawConfig {
 function defaults(): NothingclawConfig {
   return {
     bot_name: 'Mars',
+    owner_name: '',
+    owner_phone: '',
+    whatsapp_pair_owner: false,
+    whatsapp_pair_code: '',
     allowed_jids: [],
     allowed_paths: [process.cwd()],
     max_sessions: 20,
@@ -99,6 +117,12 @@ export function loadConfig(): NothingclawConfig {
   // Env overrides (highest precedence).
   const envBotName = process.env.NOTHINGCLAW_BOT_NAME;
   if (envBotName) cfg.bot_name = envBotName;
+
+  const envOwnerName = process.env.NOTHINGCLAW_OWNER_NAME;
+  if (envOwnerName) cfg.owner_name = envOwnerName;
+
+  const envOwnerPhone = process.env.NOTHINGCLAW_OWNER_PHONE;
+  if (envOwnerPhone) cfg.owner_phone = envOwnerPhone.replace(/\D/g, '');
 
   const envJids = parseList(process.env.NOTHINGCLAW_WHATSAPP_ALLOWED_JIDS);
   if (envJids !== undefined) cfg.allowed_jids = envJids;
