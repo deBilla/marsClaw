@@ -14,13 +14,14 @@ import { writeAtomic } from '../lib/atomic.ts';
 import { loadConfig, writeConfig } from '../lib/config.ts';
 import { isValidTimezone } from '../lib/timezone.ts';
 import { isServiceLoaded, stopService, startService } from '../lib/launchd.ts';
+import { findYtDlpPath } from '../mcp/youtube.ts';
 
 const rl = createInterface({ input: stdin, output: stdout });
 
-const bold  = (s: string) => console.log(`\n\x1b[1m${s}\x1b[0m`);
-const ok    = (s: string) => console.log(`\x1b[32m✓\x1b[0m ${s}`);
-const info  = (s: string) => console.log(`  ${s}`);
-const warn  = (s: string) => console.log(`\x1b[33m!\x1b[0m ${s}`);
+const bold = (s: string) => console.log(`\n\x1b[1m${s}\x1b[0m`);
+const ok = (s: string) => console.log(`\x1b[32m✓\x1b[0m ${s}`);
+const info = (s: string) => console.log(`  ${s}`);
+const warn = (s: string) => console.log(`\x1b[33m!\x1b[0m ${s}`);
 
 async function ask(prompt: string, def?: string): Promise<string> {
   const suffix = def !== undefined ? ` [${def}]` : '';
@@ -109,7 +110,9 @@ async function askLocationTimezone(
   while (true) {
     timezone = await ask('  Timezone (IANA, e.g. Asia/Colombo)', tzDefault);
     if (isValidTimezone(timezone)) break;
-    warn(`  "${timezone}" isn't a valid IANA timezone. Try e.g. Asia/Colombo, Europe/London, America/New_York.`);
+    warn(
+      `  "${timezone}" isn't a valid IANA timezone. Try e.g. Asia/Colombo, Europe/London, America/New_York.`,
+    );
   }
 
   const location = await ask('  Location (city, country — optional)', currentLocation || undefined);
@@ -141,7 +144,7 @@ async function ensureProviderInstalled(p: Provider): Promise<void> {
   if (run('npm', ['install', '-g', p.npmPackage]) !== 0) {
     throw new Error(
       `Failed to install ${p.npmPackage}. Re-run with sudo, or fix your npm prefix ` +
-      `(npm config set prefix ~/.npm-global) and add ~/.npm-global/bin to PATH.`,
+        `(npm config set prefix ~/.npm-global) and add ~/.npm-global/bin to PATH.`,
     );
   }
   if (!which(p.bin)) {
@@ -241,7 +244,7 @@ async function askChannels(
   let ownerPhone = '';
   if (whatsappEnabled) {
     if (!whatsappAlready) {
-      info('  You\'ll scan a QR to link your phone in a moment (step 9).');
+      info("  You'll scan a QR to link your phone in a moment (step 9).");
       info('  WhatsApp → Settings → Linked devices → Link a device → scan it.');
     }
     info('');
@@ -255,7 +258,7 @@ async function askChannels(
         continue;
       }
       if (ownerPhone.length < 7 || ownerPhone.length > 15) {
-        warn('  That doesn\'t look like a full international number (7–15 digits). Try again.');
+        warn("  That doesn't look like a full international number (7–15 digits). Try again.");
         continue;
       }
       break;
@@ -302,7 +305,10 @@ async function askChannels(
     info('  chat id so you can lock it down later in data/config.json.');
     const rawChats = await ask('  Allowed chat ids (comma-separated)', currentTgChats.join(',') || undefined);
     telegramAllowedChats = rawChats
-      ? rawChats.split(',').map((s) => s.trim()).filter(Boolean)
+      ? rawChats
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
       : [];
   }
 
@@ -341,15 +347,66 @@ async function askChannels(
   };
 }
 
+// Resolve (and if needed, install) yt-dlp so the youtube_transcript MCP tool
+// can fetch captions. We pin the absolute path into .env because the spawned
+// MCP server's PATH is minimal and may not include Homebrew / Python-framework
+// bin dirs. Returns the resolved path, or '' if the owner declined and the
+// binary isn't available — in which case the tool returns an install hint at
+// call time.
+async function ensureYtDlp(): Promise<string> {
+  bold('8. YouTube transcripts');
+  info("Optional but recommended. yt-dlp lets the agent fetch a video's");
+  info('transcript so it can summarise YouTube links you send. ~6MB binary,');
+  info('single-purpose.');
+
+  const existing = findYtDlpPath();
+  if (existing) {
+    ok(`Found yt-dlp at ${existing}`);
+    return existing;
+  }
+
+  if (!(await yesNo('  Install yt-dlp now?', true))) {
+    info('  Skipped. The YouTube tool will return an install hint when called.');
+    return '';
+  }
+
+  // Try in order: Homebrew (macOS), pip3 --user, pip --user. First one to
+  // succeed wins; otherwise fall back to printing manual instructions.
+  const tryInstall = (cmd: string, args: string[]): boolean => {
+    info(`  Running: ${cmd} ${args.join(' ')}`);
+    return run(cmd, args) === 0;
+  };
+
+  let installed = false;
+  if (process.platform === 'darwin' && which('brew')) {
+    installed = tryInstall('brew', ['install', 'yt-dlp']);
+  }
+  if (!installed && which('pip3')) {
+    installed = tryInstall('pip3', ['install', '--user', '--upgrade', 'yt-dlp']);
+  }
+  if (!installed && which('pip')) {
+    installed = tryInstall('pip', ['install', '--user', '--upgrade', 'yt-dlp']);
+  }
+  if (!installed) {
+    warn("  Couldn't install automatically — no brew/pip found, or the install failed.");
+    warn('  Install manually with `brew install yt-dlp` or `pip install --user yt-dlp`,');
+    warn('  then re-run setup.');
+    return '';
+  }
+
+  const found = findYtDlpPath();
+  if (!found) {
+    warn('  Installed, but not found on any known path. Open a new shell and re-run setup.');
+    return '';
+  }
+  ok(`yt-dlp installed at ${found}`);
+  return found;
+}
+
 // Seed MEMORY.md with an owner block so BOTH providers (gemini reads MEMORY.md,
 // claude gets it via persona too) know who they're talking to from turn one.
 // Idempotent: only writes if the file lacks an "## Owner" section.
-function seedMemory(
-  ownerName: string,
-  ownerPhone: string,
-  timezone: string,
-  location: string,
-): void {
+function seedMemory(ownerName: string, ownerPhone: string, timezone: string, location: string): void {
   if (!ownerName && !ownerPhone && !location && (!timezone || timezone === 'UTC')) return;
   if (!existsSync('MEMORY.md')) return;
   const body = readFileSync('MEMORY.md', 'utf-8');
@@ -366,14 +423,21 @@ function seedMemory(
 // .env holds secrets + channel-enable flags. Non-secret runtime config
 // (bot_name, allowed_jids, timezone, etc.) lives in data/config.json.
 //
-// We manage exactly: AGENT_PROVIDER, MARSCLAW_WHATSAPP, TELEGRAM_BOT_TOKEN.
-// Slack tokens hand-added by power users are left untouched.
+// We manage exactly: AGENT_PROVIDER, MARSCLAW_WHATSAPP, TELEGRAM_BOT_TOKEN,
+// MARSCLAW_YTDLP_PATH. Slack tokens hand-added by power users are left
+// untouched.
 function writeEnv(
   provider: ProviderName,
   whatsappEnabled: boolean,
   telegram: { enabled: boolean; token: string },
+  ytdlpPath: string,
 ): void {
-  const managed = new Set(['AGENT_PROVIDER', 'MARSCLAW_WHATSAPP', 'TELEGRAM_BOT_TOKEN']);
+  const managed = new Set([
+    'AGENT_PROVIDER',
+    'MARSCLAW_WHATSAPP',
+    'TELEGRAM_BOT_TOKEN',
+    'MARSCLAW_YTDLP_PATH',
+  ]);
   const existing = existsSync('.env') ? readFileSync('.env', 'utf-8') : '';
   const lines = existing.split('\n').filter((l) => {
     if (!l.trim() || l.trim().startsWith('#')) return true;
@@ -390,6 +454,10 @@ function writeEnv(
     // by uncommenting instead of fetching it from @BotFather again.
     lines.push(`# TELEGRAM_BOT_TOKEN=${telegram.token}`);
   }
+  // Pin the absolute path so the MCP subprocess (minimal PATH) finds yt-dlp
+  // without falling back to a login-shell lookup. Omitted if not installed —
+  // the tool's runtime resolver still tries common paths + login shell.
+  if (ytdlpPath) lines.push(`MARSCLAW_YTDLP_PATH=${ytdlpPath}`);
   const out = lines.join('\n').replace(/\n+$/, '') + '\n';
   writeAtomic('.env', out);
 }
@@ -401,6 +469,7 @@ function summarize(
   ch: ChannelChoices,
   timezone: string,
   location: string,
+  ytdlpPath: string,
 ): void {
   ok(`bot name:  ${botName}`);
   if (ownerName) ok(`your name: ${ownerName}`);
@@ -416,6 +485,7 @@ function summarize(
     ok(`allowed:   ${ch.telegramAllowedChats.length ? ch.telegramAllowedChats.join(', ') : 'any sender'}`);
   }
   ok(`voice:     ${ch.voiceEnabled ? 'on' : 'off'}`);
+  ok(`yt-dlp:    ${ytdlpPath || 'not installed'}`);
   if (!ch.whatsappEnabled && !ch.telegramEnabled) {
     warn('No channels enabled. The bot will refuse to start until you wire one up.');
   }
@@ -442,6 +512,8 @@ async function main(): Promise<void> {
     current.allowed_telegram_chats,
   );
 
+  const ytdlpPath = await ensureYtDlp();
+
   // Allow-list + pairing. A fresh number arms code-based pairing: the owner
   // sends a one-time code as a WhatsApp message and the bot captures that
   // sender's real JID (possibly an @lid). Re-running with the SAME number
@@ -467,12 +539,14 @@ async function main(): Promise<void> {
     allowedJids = [`${channels.ownerPhone}@s.whatsapp.net`];
   }
 
-  bold('8. Writing config');
+  bold('9. Writing config');
   try {
-    writeEnv(provider.name, channels.whatsappEnabled, {
-      enabled: channels.telegramEnabled,
-      token: channels.telegramToken,
-    });
+    writeEnv(
+      provider.name,
+      channels.whatsappEnabled,
+      { enabled: channels.telegramEnabled, token: channels.telegramToken },
+      ytdlpPath,
+    );
     writeConfig({
       bot_name: botName,
       owner_name: ownerName,
@@ -492,13 +566,13 @@ async function main(): Promise<void> {
     throw new Error(`Failed to persist config: ${msg}`);
   }
   ok('.env (secrets) and data/config.json (runtime config) written.');
-  summarize(botName, ownerName, provider.name, channels, timezone, location);
+  summarize(botName, ownerName, provider.name, channels, timezone, location, ytdlpPath);
 
   // Step 9: link WhatsApp now by scanning a QR, so onboarding finishes in one
   // sitting instead of deferring the scan to the first `bun run start`.
   let linkedNow = false;
   if (channels.whatsappEnabled) {
-    bold('9. Link WhatsApp');
+    bold('10. Link WhatsApp');
     if (await yesNo('  Link your WhatsApp now by scanning a QR?', true)) {
       info('  Opening a link session — a QR will appear shortly (≤2 min to scan)…');
       try {
@@ -539,8 +613,7 @@ async function main(): Promise<void> {
   // `bun run service restart` instead to avoid two instances.)
   bold('Done.');
   const anyChannel = channels.whatsappEnabled || channels.telegramEnabled;
-  const startPrompt =
-    pairOwner && pairCode ? 'Start the bot now to finish pairing?' : 'Start the bot now?';
+  const startPrompt = pairOwner && pairCode ? 'Start the bot now to finish pairing?' : 'Start the bot now?';
   const startNow = anyChannel && (await yesNo(startPrompt, true));
   rl.close();
 
@@ -550,11 +623,14 @@ async function main(): Promise<void> {
     // cycling). We restore it after the foreground pairing session ends.
     const serviceWasRunning = isServiceLoaded();
     if (serviceWasRunning) {
-      info('A background service is running — stopping it so the two don\'t clash…');
+      info("A background service is running — stopping it so the two don't clash…");
       const stopped = stopService();
       if (stopped.ok) ok('  Background service stopped.');
-      else warn(`  Couldn't stop it${stopped.reason ? ` (${stopped.reason})` : ''} — watch for connection cycling.`);
-      info('  When pairing is done, Ctrl+C — I\'ll bring the service back (else: bun run service start).');
+      else
+        warn(
+          `  Couldn't stop it${stopped.reason ? ` (${stopped.reason})` : ''} — watch for connection cycling.`,
+        );
+      info("  When pairing is done, Ctrl+C — I'll bring the service back (else: bun run service start).");
     }
 
     info('Starting marsClaw — press Ctrl+C when pairing is done.\n');
@@ -573,7 +649,10 @@ async function main(): Promise<void> {
       info('\nRestoring the background service…');
       const restarted = startService();
       if (restarted.ok) ok('  Background service is running again.');
-      else warn(`  Couldn't restart it${restarted.reason ? ` (${restarted.reason})` : ''}. Run: bun run service start`);
+      else
+        warn(
+          `  Couldn't restart it${restarted.reason ? ` (${restarted.reason})` : ''}. Run: bun run service start`,
+        );
     }
     process.exit(r.status ?? 0);
   }

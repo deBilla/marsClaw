@@ -15,14 +15,51 @@ Thread IDs are channel-prefixed (`telegram:`, `slack:`, `whatsapp:`); the [Chann
 
 The simplest channel to set up.
 
+### First-time setup
+
 1. Talk to [@BotFather](https://t.me/BotFather), `/newbot`, follow the prompts. You'll get a token like `123456:ABC-DEF…`.
-2. Put it in `.env`:
-   ```env
-   TELEGRAM_BOT_TOKEN=123456:ABC-DEF…
-   ```
+2. Run `bun run setup` and answer `y` to *"Enable Telegram?"*. Paste the token when prompted. Setup writes it to `.env` as `TELEGRAM_BOT_TOKEN=…` and offers to capture an optional chat-id allow-list (see below).
 3. Restart the bot. Message your bot from Telegram.
 
+Manual route, if you'd rather skip the wizard:
+
+```env
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF…
+```
+
 Telegram supports text in/out and the typing indicator. No images, no voice notes on this adapter — Telegram is the boring-and-reliable channel. Adapter: [src/channels/telegram.ts](https://github.com/deBilla/marsclaw/blob/main/src/channels/telegram.ts).
+
+### Setup is idempotent
+
+Re-running `bun run setup` picks up the existing `TELEGRAM_BOT_TOKEN` and offers `enter to keep current` when prompting for the token, so you only paste it once. The prompt also validates the shape (`<digits>:<base64-ish>`) and asks for confirmation if it looks wrong.
+
+### Disabling without losing the token
+
+Answer `n` to *"Enable Telegram?"* and setup **comments out** the token rather than deleting it:
+
+```env
+# TELEGRAM_BOT_TOKEN=123456:ABC-DEF…
+```
+
+The runtime keys off the presence of an uncommented token, so the channel goes dark — but you can re-enable later by uncommenting that line (or by re-running setup) without bothering @BotFather again.
+
+### Allow-list
+
+Telegram has no phone-based identity, so the only inbound gate is a chat-id allow-list. Setup will ask:
+
+```
+  Allowed chat ids (comma-separated): 123456789,987654321
+```
+
+Empty means accept any sender. Most owners don't know their chat id yet — the bot logs each new sender at info level on first message, so the usual flow is: leave it empty initially, send a message to the bot from your phone, copy the chat id from the logs into `data/config.json`:
+
+```jsonc
+{
+  "allowed_telegram_chats": ["123456789"]
+}
+```
+
+or shadow it via `MARSCLAW_TELEGRAM_ALLOWED_CHATS=123456789` in `.env`. On boot the log echoes which mode you're in.
 
 ## Slack
 

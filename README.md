@@ -25,6 +25,7 @@ For a deeper comparison with the multi-tenant cousin, see [docs/vs-nanoclaw.md](
 - **Two agent SDKs, one wire format.** Pick Gemini or Claude. Switch any time with `bun run provider`. Automatic Claude→Gemini failover when Claude is over-quota.
 - **Multi-channel.** Telegram, Slack (Socket Mode), WhatsApp (Baileys, QR auth). Enable any combination.
 - **Voice in and out.** WhatsApp voice notes are transcribed locally (faster-whisper); replies can be spoken locally (kokoro-onnx). No cloud, no Docker.
+- **YouTube transcripts.** Send a link, get a summary — the bot fetches captions via `yt-dlp` and the agent summarises in its reply.
 - **Images & files.** WhatsApp images are downloaded and passed to the agent for vision. The agent can deliver files back to the user via the `send_file` MCP tool.
 - **Google built-in.** OAuth-once, multiple Google accounts, MCP tools for Gmail, Calendar, Contacts, Drive, Sheets, Docs, Slides.
 - **Persistent memory.** `MEMORY.md` is the agent's own long-term notebook. A `wiki/` folder holds longer structured pages.
@@ -75,6 +76,7 @@ Browse the docs site at **<https://deBilla.github.io/marsClaw/>** — or read th
 - [docs/channels.md](docs/channels.md) — per-channel setup: Telegram, Slack, WhatsApp
 - [docs/providers.md](docs/providers.md) — Gemini vs Claude, switching, auth, costs, failover
 - [docs/voice.md](docs/voice.md) — Whisper STT + Kokoro TTS sidecars, voices, model sizes
+- [docs/youtube.md](docs/youtube.md) — YouTube transcript MCP tool, yt-dlp dependency, auto-summarise behaviour
 - [docs/google.md](docs/google.md) — Google OAuth (Gmail/Calendar/Drive/Sheets/Docs/Slides/Contacts)
 - [docs/operations.md](docs/operations.md) — running as a launchd service, backups, observability, troubleshooting
 - [docs/security.md](docs/security.md) — threat model, capability flags, audit log, residual risks
@@ -86,6 +88,7 @@ Browse the docs site at **<https://deBilla.github.io/marsClaw/>** — or read th
 - macOS or Linux (or WSL). Setup auto-installs nvm, Node (pinned LTS, default 22), and Bun — no prerequisites beyond `curl` and `bash`.
 - A bot/app token from each channel you want to enable.
 - **Voice (optional):** Python 3.10+ and `ffmpeg`. On macOS: `brew install python@3.11 ffmpeg`.
+- **YouTube transcripts (optional):** `yt-dlp`. Setup will offer to install it via `brew` or `pip` and pin its path into `.env`.
 
 ## Privacy
 

@@ -44,6 +44,12 @@ Env wins because existing users have `.env` muscle-memory and a binary upgrade m
 | `KOKORO_VOICE` | Default voice (`af_heart`, `af_bella`, `am_adam`, …) |
 | `KOKORO_FORMAT` | `ogg` (voice note) / `mp3` / `wav` |
 
+### YouTube transcripts
+
+| Key | Notes |
+|---|---|
+| `MARSCLAW_YTDLP_PATH` | Absolute path to `yt-dlp`. Setup pins this; the runtime falls back to common install dirs + a login-shell lookup if unset. See [youtube.md](youtube.md) |
+
 ### Behavior overrides
 
 Each shadows the same field in `data/config.json`.
