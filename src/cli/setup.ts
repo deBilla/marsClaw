@@ -55,6 +55,15 @@ function envHas(key: string): boolean {
   return re.test(readFileSync('.env', 'utf-8'));
 }
 
+// Read the value of an uncommented `KEY=value` line from .env (commented lines
+// are ignored so we never resurrect a token the owner deliberately disabled).
+function envValue(key: string): string {
+  if (!existsSync('.env')) return '';
+  const re = new RegExp(`^\\s*${key}\\s*=\\s*(.*?)\\s*$`, 'm');
+  const m = re.exec(readFileSync('.env', 'utf-8'));
+  return m ? m[1].trim() : '';
+}
+
 // Phone → digits only (country code + number, no + / spaces / dashes), the
 // shape WhatsApp uses in a @s.whatsapp.net JID.
 function normalizePhone(raw: string): string {
@@ -207,11 +216,21 @@ async function triggerLogin(p: Provider): Promise<void> {
 interface ChannelChoices {
   whatsappEnabled: boolean;
   ownerPhone: string;
+  telegramEnabled: boolean;
+  // The token to persist to .env. When Telegram is enabled, the new or kept
+  // token; when disabled, the existing token (so writeEnv can comment it out
+  // rather than drop it). Empty means there's nothing to persist.
+  telegramToken: string;
+  telegramAllowedChats: string[];
   voiceEnabled: boolean;
 }
 
-async function askChannels(currentVoice: boolean, currentPhone: string): Promise<ChannelChoices> {
-  bold('7. WhatsApp + voice');
+async function askChannels(
+  currentVoice: boolean,
+  currentPhone: string,
+  currentTgChats: string[],
+): Promise<ChannelChoices> {
+  bold('7. Channels + voice');
 
   const whatsappAlready = envHas('MARSCLAW_WHATSAPP');
   info('Connects via Baileys (unofficial WhatsApp library) — QR scan from your phone.');
@@ -243,10 +262,54 @@ async function askChannels(currentVoice: boolean, currentPhone: string): Promise
     }
   }
 
+  // Telegram: enabled purely by the presence of a bot token in .env (no QR /
+  // pairing — @BotFather hands you the token directly). Default the prompt to
+  // "on" when a token already exists so re-running setup keeps it.
+  info('');
+  const existingToken = envValue('TELEGRAM_BOT_TOKEN');
+  info('Telegram — create a bot with @BotFather and paste the token it gives you.');
+  if (existingToken) info('  A token is already set in .env.');
+  const telegramEnabled = await yesNo('  Enable Telegram?', Boolean(existingToken));
+
+  // When disabled, carry any existing token forward so writeEnv comments it out
+  // (the runtime keys off token presence) instead of leaving it live.
+  let telegramToken = telegramEnabled ? '' : existingToken;
+  let telegramAllowedChats = currentTgChats;
+  if (telegramEnabled) {
+    while (true) {
+      const raw = await ask(existingToken ? '  Bot token (enter to keep current)' : '  Bot token');
+      if (!raw && existingToken) {
+        telegramToken = existingToken;
+        break;
+      }
+      if (!raw) {
+        warn('  A token is required to enable Telegram.');
+        continue;
+      }
+      if (!/^\d{6,}:[A-Za-z0-9_-]{30,}$/.test(raw)) {
+        if (!(await yesNo("  That doesn't look like a bot token. Use it anyway?", false))) continue;
+      }
+      telegramToken = raw;
+      break;
+    }
+
+    // Optional sender lock-down. Telegram has no phone-based identity, so the
+    // chat-id allow-list is the only gate. Most owners don't know their chat id
+    // yet (the bot logs it on first message), so empty is fine — accept all for
+    // now, lock down later.
+    info('  Restrict to specific Telegram chat ids (optional).');
+    info('  Leave empty to accept any sender for now — the bot logs each new');
+    info('  chat id so you can lock it down later in data/config.json.');
+    const rawChats = await ask('  Allowed chat ids (comma-separated)', currentTgChats.join(',') || undefined);
+    telegramAllowedChats = rawChats
+      ? rawChats.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+  }
+
   info('');
   info('Voice transcription (local Whisper, ~600MB one-time install).');
   if (currentVoice) info('  Currently enabled in config.');
-  const voiceDefault = currentVoice || whatsappEnabled;
+  const voiceDefault = currentVoice || whatsappEnabled || telegramEnabled;
   let voiceEnabled = await yesNo('  Enable voice?', voiceDefault);
 
   if (voiceEnabled) {
@@ -268,7 +331,14 @@ async function askChannels(currentVoice: boolean, currentPhone: string): Promise
     }
   }
 
-  return { whatsappEnabled, ownerPhone, voiceEnabled };
+  return {
+    whatsappEnabled,
+    ownerPhone,
+    telegramEnabled,
+    telegramToken,
+    telegramAllowedChats,
+    voiceEnabled,
+  };
 }
 
 // Seed MEMORY.md with an owner block so BOTH providers (gemini reads MEMORY.md,
@@ -296,10 +366,14 @@ function seedMemory(
 // .env holds secrets + channel-enable flags. Non-secret runtime config
 // (bot_name, allowed_jids, timezone, etc.) lives in data/config.json.
 //
-// We manage exactly: AGENT_PROVIDER, MARSCLAW_WHATSAPP.
-// Telegram/Slack tokens hand-added by power users are left untouched.
-function writeEnv(provider: ProviderName, whatsappEnabled: boolean): void {
-  const managed = new Set(['AGENT_PROVIDER', 'MARSCLAW_WHATSAPP']);
+// We manage exactly: AGENT_PROVIDER, MARSCLAW_WHATSAPP, TELEGRAM_BOT_TOKEN.
+// Slack tokens hand-added by power users are left untouched.
+function writeEnv(
+  provider: ProviderName,
+  whatsappEnabled: boolean,
+  telegram: { enabled: boolean; token: string },
+): void {
+  const managed = new Set(['AGENT_PROVIDER', 'MARSCLAW_WHATSAPP', 'TELEGRAM_BOT_TOKEN']);
   const existing = existsSync('.env') ? readFileSync('.env', 'utf-8') : '';
   const lines = existing.split('\n').filter((l) => {
     if (!l.trim() || l.trim().startsWith('#')) return true;
@@ -308,6 +382,14 @@ function writeEnv(provider: ProviderName, whatsappEnabled: boolean): void {
   });
   lines.push(`AGENT_PROVIDER=${provider}`);
   if (whatsappEnabled) lines.push('MARSCLAW_WHATSAPP=1');
+  if (telegram.enabled && telegram.token) {
+    lines.push(`TELEGRAM_BOT_TOKEN=${telegram.token}`);
+  } else if (telegram.token) {
+    // Disabled but we still hold the token — keep it commented so the runtime
+    // (which keys off token presence) ignores it, but the owner can re-enable
+    // by uncommenting instead of fetching it from @BotFather again.
+    lines.push(`# TELEGRAM_BOT_TOKEN=${telegram.token}`);
+  }
   const out = lines.join('\n').replace(/\n+$/, '') + '\n';
   writeAtomic('.env', out);
 }
@@ -329,8 +411,12 @@ function summarize(
   if (ch.whatsappEnabled) {
     ok(`allowed:   ${ch.ownerPhone ? `${ch.ownerPhone} (and the chat captured at pairing)` : 'any sender'}`);
   }
+  ok(`telegram:  ${ch.telegramEnabled ? 'on' : 'off'}`);
+  if (ch.telegramEnabled) {
+    ok(`allowed:   ${ch.telegramAllowedChats.length ? ch.telegramAllowedChats.join(', ') : 'any sender'}`);
+  }
   ok(`voice:     ${ch.voiceEnabled ? 'on' : 'off'}`);
-  if (!ch.whatsappEnabled) {
+  if (!ch.whatsappEnabled && !ch.telegramEnabled) {
     warn('No channels enabled. The bot will refuse to start until you wire one up.');
   }
 }
@@ -350,7 +436,11 @@ async function main(): Promise<void> {
   const provider = await pickProviderInteractive(current.agent_provider);
   await ensureProviderInstalled(provider);
   await triggerLogin(provider);
-  const channels = await askChannels(current.voice_enabled, current.owner_phone);
+  const channels = await askChannels(
+    current.voice_enabled,
+    current.owner_phone,
+    current.allowed_telegram_chats,
+  );
 
   // Allow-list + pairing. A fresh number arms code-based pairing: the owner
   // sends a one-time code as a WhatsApp message and the bot captures that
@@ -379,7 +469,10 @@ async function main(): Promise<void> {
 
   bold('8. Writing config');
   try {
-    writeEnv(provider.name, channels.whatsappEnabled);
+    writeEnv(provider.name, channels.whatsappEnabled, {
+      enabled: channels.telegramEnabled,
+      token: channels.telegramToken,
+    });
     writeConfig({
       bot_name: botName,
       owner_name: ownerName,
@@ -389,6 +482,7 @@ async function main(): Promise<void> {
       agent_provider: provider.name,
       voice_enabled: channels.voiceEnabled,
       allowed_jids: allowedJids,
+      allowed_telegram_chats: channels.telegramAllowedChats,
       whatsapp_pair_owner: pairOwner,
       whatsapp_pair_code: pairCode,
     });
@@ -444,8 +538,10 @@ async function main(): Promise<void> {
   // to receive it. (If you run marsClaw as a service, decline this and use
   // `bun run service restart` instead to avoid two instances.)
   bold('Done.');
-  const startNow =
-    channels.whatsappEnabled && (await yesNo('Start the bot now to finish pairing?', true));
+  const anyChannel = channels.whatsappEnabled || channels.telegramEnabled;
+  const startPrompt =
+    pairOwner && pairCode ? 'Start the bot now to finish pairing?' : 'Start the bot now?';
+  const startNow = anyChannel && (await yesNo(startPrompt, true));
   rl.close();
 
   if (startNow) {
