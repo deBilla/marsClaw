@@ -24,6 +24,7 @@ Pick by what you need to do.
 - [channels.md](channels.md) — per-channel setup (Telegram, Slack, WhatsApp) including the WhatsApp pairing flow.
 - [providers.md](providers.md) — Gemini vs Claude, switching, auth, costs, failover.
 - [voice.md](voice.md) — Whisper STT + Kokoro TTS sidecars, voices, model sizes.
+- [youtube.md](youtube.md) — YouTube transcript MCP tool, yt-dlp dependency, auto-summarise behaviour.
 - [google.md](google.md) — Google OAuth, multiple accounts, Gmail/Calendar/Drive/Sheets/Docs/Slides MCP tools.
 
 ## Run it

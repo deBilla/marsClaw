@@ -12,6 +12,7 @@ import { sheetsReadTool, sheetsWriteTool, sheetsRawTool } from './sheets.ts';
 import { docsReadTool, docsRawTool } from './docs.ts';
 import { slidesReadTool, slidesRawTool } from './slides.ts';
 import { googleAccountsTool } from './google_accounts.ts';
+import { youtubeTranscriptTool } from './youtube.ts';
 
 const tools = [
   sendTool,
@@ -36,6 +37,7 @@ const tools = [
   docsRawTool,
   slidesReadTool,
   slidesRawTool,
+  youtubeTranscriptTool,
 ];
 
 const server = new Server(
