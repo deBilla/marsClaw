@@ -34,6 +34,98 @@ const MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 const HISTORY_TURNS = 20;
 const MEMORY_PATH = process.env.MARSCLAW_MEMORY ?? 'MEMORY.md';
 
+// The gemini CLI wraps every model call in retry-with-backoff (up to ~10
+// attempts on 429/RESOURCE_EXHAUSTED). Calling generateContent() directly skips
+// that, so a single transient *per-minute* rate limit used to bubble straight up
+// and get misreported as "daily quota exhausted" — even when the daily quota was
+// barely touched. The free Code-Assist tier returns, e.g.:
+//   "You have exhausted your capacity on this model. Your quota will reset
+//    after 7s."
+// A 7-second reset is plainly a per-minute throttle, not a blown daily quota.
+// Mirror the CLI: parse the reset delay; anything that clears within
+// MAX_RETRYABLE_DELAY_MS is retried with backoff inside the turn's time budget;
+// only a long/absent delay with explicit daily markers is treated as terminal.
+const MAX_RETRIES = 6;
+const BASE_DELAY_MS = 2_000;
+const MAX_WAIT_MS = 30_000;
+// gemini-cli-core's own cutoff: a suggested delay above this is "terminal".
+const MAX_RETRYABLE_DELAY_MS = 300_000; // 5 min
+
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+function httpStatus(err: unknown): number | undefined {
+  const e = err as { status?: unknown; code?: unknown; response?: { status?: unknown } };
+  const s = e?.status ?? e?.code ?? e?.response?.status;
+  return typeof s === 'number' ? s : undefined;
+}
+
+// Pull a server-suggested delay out of the error, in ms. Covers the prose forms
+// ("reset after 7s", "retry in 1.5s", "Please retry in 200ms"), the structured
+// RetryInfo ("retryDelay":"57s"), and a numeric Retry-After header. Returns
+// undefined when no delay is advertised.
+function suggestedDelayMs(err: unknown): number | undefined {
+  const msg = errorText(err);
+  const prose = msg.match(/(?:reset(?:s)?\s+(?:after|in)|retry\s+in)\s+([0-9.]+)\s*(ms|s)\b/i);
+  if (prose) {
+    const n = parseFloat(prose[1]);
+    if (!Number.isNaN(n)) return prose[2].toLowerCase() === 'ms' ? n : n * 1000;
+  }
+  const structured = msg.match(/retryDelay"?\s*[:=]\s*"?([0-9.]+)\s*(ms|s)\b/i);
+  if (structured) {
+    const n = parseFloat(structured[1]);
+    if (!Number.isNaN(n)) return structured[2].toLowerCase() === 'ms' ? n : n * 1000;
+  }
+  const ra = (err as { response?: { headers?: Record<string, unknown> } })?.response?.headers?.[
+    'retry-after'
+  ];
+  if (typeof ra === 'string' && /^\d+$/.test(ra)) return Number(ra) * 1000;
+  return undefined;
+}
+
+// Looks like a throttle/transient (429, 5xx, or the capacity/rate-limit prose).
+function isTransient(err: unknown): boolean {
+  const status = httpStatus(err);
+  if (status === 429 || status === 503 || (status !== undefined && status >= 500 && status < 600))
+    return true;
+  return /RESOURCE_EXHAUSTED|rate.?limit|exhausted your capacity|quota will reset|PerMinute|\bretry in\b/i.test(
+    errorText(err),
+  );
+}
+
+// Terminal = won't clear with a short wait: an explicit daily marker, or a
+// suggested delay longer than the retryable cutoff.
+function isTerminalQuota(err: unknown, delayMs: number | undefined): boolean {
+  if (delayMs !== undefined && delayMs > MAX_RETRYABLE_DELAY_MS) return true;
+  return /QUOTA_EXHAUSTED|PerDay|\bDaily\b/i.test(errorText(err));
+}
+
+async function withRateLimitRetry<T>(fn: () => Promise<T>, deadline: number): Promise<T> {
+  let backoff = BASE_DELAY_MS;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const suggested = suggestedDelayMs(err);
+      if (!isTransient(err) || isTerminalQuota(err, suggested) || attempt > MAX_RETRIES) throw err;
+      // Honor the server's suggested reset window when it's short; otherwise
+      // exponential backoff. Add jitter so retries don't resynchronize.
+      const base = Math.min(suggested ?? backoff, MAX_WAIT_MS);
+      const wait = base + Math.floor(Math.random() * 500);
+      if (Date.now() + wait >= deadline) throw err; // no time budget left
+      log.warn('gemini: throttled, backing off', { attempt, wait_ms: wait, suggested_ms: suggested });
+      await new Promise((r) => setTimeout(r, wait));
+      backoff = Math.min(backoff * 2, MAX_WAIT_MS);
+    }
+  }
+}
+
 let cgPromise: Promise<ContentGenerator> | null = null;
 
 // The marsClaw persona, assembled by Config.initialize() from the GEMINI.md
@@ -139,14 +231,19 @@ export async function runGeminiSdk(
   const systemInstruction = buildSystemInstruction();
 
   const t0 = Date.now();
-  const reqPromise = cg.generateContent(
-    {
-      model: MODEL,
-      contents,
-      ...(systemInstruction ? { config: { systemInstruction } } : {}),
-    },
-    `${threadId}-${Date.now()}`,
-    LlmRole.MAIN,
+  const deadline = t0 + timeoutMs;
+  const reqPromise = withRateLimitRetry(
+    () =>
+      cg.generateContent(
+        {
+          model: MODEL,
+          contents,
+          ...(systemInstruction ? { config: { systemInstruction } } : {}),
+        },
+        `${threadId}-${Date.now()}`,
+        LlmRole.MAIN,
+      ),
+    deadline,
   );
 
   const timer = new Promise<never>((_, reject) =>
