@@ -23,6 +23,12 @@ marsClaw is one Bun process. SQLite is the only persistent state. The agent SDK 
 
 Single dispatcher in [src/index.ts](https://github.com/deBilla/marsclaw/blob/main/src/index.ts) serializes per thread: two messages from the same chat never run two agent calls in parallel. The outbox is the only path for asynchronous side-channel messages — the agent's MCP tools enqueue rows, the drain loop delivers them.
 
+## Two runtimes
+
+The flow above is the **`in-process`** runtime (default): the agent SDK loop runs inside the host bot process and is secured by capability removal (path gates, no shell/web, sensitive-path guard).
+
+Setting `runtime: container` (or `MARSCLAW_RUNTIME=container`) keeps everything left of `handleMessage` identical — channels, per-thread serialization, SQLite, the outbox drain — but the host becomes a **broker** that ships each turn over `POST /turn` to an isolated agent container, with the real Anthropic credential, Google OAuth, and web egress held by host-side sidecars. The container holds no secrets; security shifts from capability removal to isolation. Full detail, the host/sidecar diagram, and the per-mode security table are in [container-runtime.md](container-runtime.md).
+
 ## Components
 
 | Layer                       | Where                                                     | Notes |

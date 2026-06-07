@@ -10,6 +10,8 @@ There are now **two layers** to that principle, and they compose:
 
 The containment layer is **off by default** and platform-dependent — read "The honest platform constraint" below before relying on it.
 
+> **There is now a third option that supersedes most of this for the host-protection goal: a true container runtime** (`runtime: container`). Instead of confining the in-process agent with `sandbox-exec`/`pf`, it runs the whole SDK loop inside an isolated container — `.env`/DB/creds are never mounted, the real Anthropic credential lives in a host-side proxy, and web egress goes through an SSRF gateway. It changes the security model materially (full shell + raw web inside the box, in exchange for host isolation); the `tools/sandbox/` layer below is mutually exclusive with it and is being retired. If host isolation is your goal, prefer the container runtime — see [container-runtime.md](container-runtime.md) for the model and its trade-offs.
+
 ## The threat we defend against
 
 A **prompt-injected agent**. The bot routinely reads attacker-influenceable text — email bodies via Gmail tools, web pages via WebFetch, search snippets, even chat messages from anyone allowed to message the bot. Any of that content can carry "ignore previous instructions, do X" payloads. We design as though every turn could be hostile.
@@ -18,12 +20,12 @@ A **prompt-injected agent**. The bot routinely reads attacker-influenceable text
 
 In rough order of risk:
 
-1. **Supply-chain compromise.** The Claude Agent SDK, `googleapis`, every dep in `node_modules` runs in-process as you. A malicious package bypasses every gate. Only kernel/container isolation closes this — see [vs-nanoclaw.md](vs-nanoclaw.md).
+1. **Supply-chain compromise.** The Claude Agent SDK, `googleapis`, every dep in `node_modules` runs in-process as you. A malicious package bypasses every gate. Only kernel/container isolation closes this — in the default `in-process` runtime we don't claim to. The opt-in **container runtime** (`runtime: container`) does close it for the host: deps run inside the box with no host fs, no `.env`, and only a rotatable session token. See [container-runtime.md](container-runtime.md) and [vs-nanoclaw.md](vs-nanoclaw.md).
 2. **The model provider.** Your context goes to Anthropic / Google on every turn. Inherent to using a hosted model.
 3. **Host-level compromise.** The bot runs as your user; if your account is compromised, all bets are off.
 4. **The model itself misbehaving without injection.** Hallucinated outputs in chat aren't a security event — they're a quality event.
 
-If any of these are your real threat, marsClaw is the wrong tool. Use NanoClaw / a containerised agent.
+If any of these are your real threat in the default in-process runtime, you want isolation. Two routes: switch marsClaw to its **container runtime** ([container-runtime.md](container-runtime.md)), or step up to NanoClaw / a multi-tenant containerised agent ([vs-nanoclaw.md](vs-nanoclaw.md)).
 
 ## Architecture: agent thinks, broker acts
 
@@ -179,6 +181,8 @@ The agent subprocess is launched with a curated env ([claude-sdk.ts](https://git
 
 ### Kernel sandbox — `tools/sandbox/`
 
+> **Superseded.** This sandbox-exec/bubblewrap layer was the in-process way to approximate isolation. The **container runtime** ([container-runtime.md](container-runtime.md)) now provides real isolation and is mutually exclusive with it; `tools/sandbox/` is being retired. The description below is kept for the legacy in-process hardened posture only — prefer `runtime: container` for new setups.
+
 - **macOS**: `marsclaw.sb` — a deny-default `sandbox-exec` profile providing **write confinement** (a hijacked shell can only write `data/`, `logs/`, `tmp`), **network containment** (loopback-only when egress is enforced), and denies of pivot paths the bot never needs (`~/.ssh`, browser cookies). It does **not** kernel-deny the bot's own credentials (`.env`, `~/.claude.json`, `~/.gemini`, `data/whatsapp-auth`, Keychain) — the bot reads those to function (denying `.env` makes Bun abort at launch), so kernel-protecting them requires **identity separation** (running the agent as a different user / in a container) or the full credential-isolation layer. Protection for those files against the agent still comes from the in-process sensitive-path gate + shell-off-by-default. This is the strongest argument for the containerized approach — see [vs-nanoclaw.md](vs-nanoclaw.md).
 - **Linux**: `run-linux.sh` — bubblewrap with tmpfs `$HOME` (credentials don't exist in the namespace), read-only system + source, dropped caps; `seccomp.json` denies `ptrace`/`mount`/`setns`/`bpf`/… .
 
@@ -191,6 +195,8 @@ Every mutating tool ([mutation-gate.ts](https://github.com/deBilla/marsclaw/blob
 "All traffic must traverse the gateway" is a **kernel** property:
 - **Linux** — a network namespace whose only route is the gateway makes it airtight. (Scaffolded in `run-linux.sh`; validate on a real Linux host before relying on it.)
 - **macOS** — no netns. Enforcement is the `pf` packet-filter anchor (`tools/sandbox/pf-anchor.conf`), which drops outbound from the bot's user except to the gateway + DNS. Proxy env vars are only a hint (Node's fetch ignores them). **Therefore the URL allow-list is relaxed only when `MARSCLAW_EGRESS_ENFORCED=1`** — an operator assertion you set *after* installing and verifying the pf anchor. Without it, the allow-list stays the boundary (fail-safe).
+
+> **Activation gap (read before relying on this).** The enforced path is wired in code (`src/lib/tool-permissions.ts` checks `MARSCLAW_EGRESS_ENFORCED === '1'`), but **nothing in the default install sets that env var** — at present it appears only in a commented-out block of the hardened launch plist. So out of the box the gateway/sandbox layer is *present but not activated*, and the URL allow-list remains the boundary (the safe default). To actually run enforced, set `MARSCLAW_EGRESS_ENFORCED=1` in the launch wrapper/service env **after** installing and verifying the pf anchor (macOS) or the netns route (Linux) — never as a bare assertion without the kernel control behind it, or you've relaxed the allow-list with nothing replacing it. If you don't need this, prefer the **container runtime**, where isolation is the boundary and there's no env-var assertion to get wrong.
 
 ## Configuration cheatsheet — postures
 
@@ -242,6 +248,18 @@ The point of the containment layer: open the inputs *because* the consequences a
 
 Then run hardened (`bun run service install --hardened`) with `EGRESS_GATEWAY=1`, `LLM_PROXY=1`, `SANDBOX=1`, and — on macOS, after `sudo tools/sandbox/install-pf-anchor.sh` — `MARSCLAW_EGRESS_ENFORCED=1`. With egress contained you can even consider `allow_shell: true`, since the sandbox denies the credential paths shell would otherwise reach.
 
+### Containerized (real isolation — the box is the boundary)
+The successor to the "Contained" posture. Instead of confining the in-process agent, run the whole SDK loop in an isolated container: `.env`/DB/creds are never mounted, the real Anthropic credential lives in the host-side llm-proxy, and web egress goes through the SSRF gateway sidecar. Inside the box the agent has **full shell and raw web** — the capability flags and the URL allow-list go inert (the isolation, not the policy, is the boundary), while host Google writes are forced through per-call approval on the host MCP.
+
+```bash
+bun run container enable        # runtime=container; mints MARSCLAW_MCP_TOKEN
+bun run container login         # mint the OAuth token held only by the proxy
+docker build -f container/agent-service/Dockerfile -t marsclaw-agent:latest .
+bun run start                   # broker boots sidecars; box wakes on first message
+```
+
+Read [container-runtime.md](container-runtime.md) before relying on it — including the trade (isolation protects the host, but the agent keeps Google read + raw public-web egress, so exfil-to-public-web is *not* closed) and the current known issues (e.g. the egress gateway binds `0.0.0.0` with no auth — don't run container mode on an untrusted network yet).
+
 ## Residual risks (honest list)
 
 In rough order of how much they matter:
@@ -269,7 +287,8 @@ In rough order of how much they matter:
 | Egress gateway + SSRF classifier | [tools/egress-gateway/gateway.ts](https://github.com/deBilla/marsclaw/blob/main/tools/egress-gateway/gateway.ts), [ssrf.ts](https://github.com/deBilla/marsclaw/blob/main/tools/egress-gateway/ssrf.ts) |
 | LLM credential isolation (curated subprocess env) | [src/providers/claude-sdk.ts](https://github.com/deBilla/marsclaw/blob/main/src/providers/claude-sdk.ts) `agentSubprocessEnv`, [tools/llm-proxy/proxy.ts](https://github.com/deBilla/marsclaw/blob/main/tools/llm-proxy/proxy.ts) |
 | Per-call mutation approval | [src/lib/approval-gate.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/approval-gate.ts), [src/db/approvals.ts](https://github.com/deBilla/marsclaw/blob/main/src/db/approvals.ts), interception in [src/index.ts](https://github.com/deBilla/marsclaw/blob/main/src/index.ts) |
-| Kernel sandbox + egress enforcement | [tools/sandbox/](https://github.com/deBilla/marsclaw/blob/main/tools/sandbox/) (`marsclaw.sb`, `run-*.sh`, `pf-anchor.conf`, `seccomp.json`, `launch-hardened.sh`) |
+| Kernel sandbox + egress enforcement (legacy, superseded) | [tools/sandbox/](https://github.com/deBilla/marsclaw/blob/main/tools/sandbox/) (`marsclaw.sb`, `run-*.sh`, `pf-anchor.conf`, `seccomp.json`, `launch-hardened.sh`) |
+| Container runtime (isolation, broker, sidecars) | [src/providers/container-runtime.ts](https://github.com/deBilla/marsclaw/blob/main/src/providers/container-runtime.ts), [container-client.ts](https://github.com/deBilla/marsclaw/blob/main/src/providers/container-client.ts), [container/agent-service/](https://github.com/deBilla/marsclaw/blob/main/container/agent-service/), [src/mcp/http-server.ts](https://github.com/deBilla/marsclaw/blob/main/src/mcp/http-server.ts), [src/cli/container.ts](https://github.com/deBilla/marsclaw/blob/main/src/cli/container.ts) |
 | Audit-density alerting | [src/lib/audit-log.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/audit-log.ts) `registerAuditAlerter` |
 
 For the comparison against the multi-tenant alternative — when in-process is enough vs. when you need a container — see [vs-nanoclaw.md](vs-nanoclaw.md).
