@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for marsClaw.app and the embedded Bun engine.
+
+  - allow-jit / allow-unsigned-executable-memory: the engine is the Bun runtime
+    (a JS engine), which JITs. Required or it crashes under hardened runtime.
+  - disable-library-validation: the app launches a separately-signed nested
+    binary (the engine); this avoids team-id library-validation faults.
+  - network.client/server: the bot makes outbound calls and binds a localhost
+    health/MCP/sidecar port.
+
+  NOT sandboxed (no app-sandbox key): the app manages a LaunchAgent, writes to
+  ~/Library/Application Support, and spawns the engine — incompatible with the
+  App Sandbox. Notarization requires the hardened runtime, not the sandbox.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+</dict>
+</plist>

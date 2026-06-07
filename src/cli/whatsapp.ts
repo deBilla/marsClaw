@@ -35,6 +35,20 @@ switch (sub) {
     info('  Settings → Linked devices → Link a device → scan');
     break;
 
+  case 'link': {
+    printBanner('whatsapp link');
+    const { linkWhatsapp } = await import('../channels/whatsapp-link.ts');
+    info('A QR code will appear below.');
+    info('On your phone: WhatsApp → Settings → Linked devices → Link a device → scan it.');
+    console.log();
+    const res = await linkWhatsapp({ timeoutMs: 120_000 });
+    if (res.status === 'already-linked') ok('Already linked — nothing to scan.');
+    else if (res.status === 'linked') ok('WhatsApp linked! You can close this window.');
+    else if (res.status === 'timeout') warn('Timed out waiting for the scan. Re-run to try again.');
+    else warn(`Linking failed (${res.detail ?? res.status}). Re-run to try again.`);
+    break;
+  }
+
   case 'status': {
     const linked = existsSync(AUTH_DIR);
     const mediaCount = existsSync(MEDIA_DIR) ? readdirSync(MEDIA_DIR).length : 0;
@@ -59,6 +73,7 @@ switch (sub) {
   default:
     console.log('Usage: marsclaw whatsapp <command>\n');
     console.log('Commands:');
+    console.log('  link          Render a QR and wait for your phone to link (used by the GUI)');
     console.log('  reset         Clear linked-device auth — next start triggers a new QR');
     console.log('  status        Show link state and cached media count');
     console.log('  clear-media   Delete cached message media (images, etc.)');

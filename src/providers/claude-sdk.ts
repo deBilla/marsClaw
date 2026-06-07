@@ -29,6 +29,25 @@ import { archiveConversation } from '../lib/conversation-archive.ts';
 import { isOverBudget, recordUsage, todaySpendUsd } from '../lib/cost-tracker.ts';
 import { isUsingMeteredApi } from './claude.ts';
 import { ClaudeHardError, classifyHardError, isTransientError, userFriendlyError } from './claude-error.ts';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+
+// The Agent SDK spawns the `claude` CLI executable. In a compiled binary the
+// SDK's bundled copy isn't on disk ("Native CLI binary ... not found"), so point
+// it at the system install. In a dev checkout this resolves the same binary, or
+// stays undefined and the SDK uses its node_modules copy. Override:
+// MARSCLAW_CLAUDE_CLI. Absolute candidates so it works under launchd's minimal PATH.
+function resolveClaudeCli(): string | undefined {
+  const override = process.env.MARSCLAW_CLAUDE_CLI;
+  if (override && existsSync(override)) return override;
+  const candidates = [`${homedir()}/.local/bin/claude`, '/opt/homebrew/bin/claude', '/usr/local/bin/claude'];
+  for (const c of candidates) if (existsSync(c)) return c;
+  const r = spawnSync('which', ['claude'], { encoding: 'utf-8' });
+  const p = r.status === 0 ? r.stdout.trim() : '';
+  return p && existsSync(p) ? p : undefined;
+}
+const CLAUDE_CLI_PATH = resolveClaudeCli();
 
 const PROVIDER_NAME = 'claude';
 const config = loadConfig();
@@ -245,6 +264,8 @@ class ClaudeSession {
       prompt: this.stream,
       options: {
         cwd: process.cwd(),
+        // Use the system `claude` CLI when found (required for the compiled binary).
+        ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
         resume: resumeId ?? undefined,
         // 'default' + canUseTool callback instead of bypassPermissions.
         // The callback gates filesystem-touching tools by allowed_paths

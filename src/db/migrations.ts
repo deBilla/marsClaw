@@ -12,8 +12,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Database } from 'bun:sqlite';
 import { log } from '../lib/log.ts';
+import { assetPath } from '../lib/paths.ts';
 
-const MIGRATIONS_DIR = process.env.MARSCLAW_MIGRATIONS_DIR ?? 'migrations';
+// The .sql files are read-only app assets, not user state — they live in the
+// bundle (ASSETS), not under HOME, in a packaged install.
+const MIGRATIONS_DIR = process.env.MARSCLAW_MIGRATIONS_DIR ?? assetPath('migrations');
 const BOOTSTRAP_STAMP_AT = 2; // schemas predating this system match 0001 + 0002
 
 function ensureSchemaTable(db: Database): void {

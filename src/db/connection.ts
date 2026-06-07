@@ -5,8 +5,9 @@ import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runMigrations } from './migrations.ts';
+import { homePath } from '../lib/paths.ts';
 
-export const DB_PATH = process.env.MARSCLAW_DB ?? 'data/marsclaw.db';
+export const DB_PATH = process.env.MARSCLAW_DB ?? homePath('data/marsclaw.db');
 
 export function initDb(): Database {
   mkdirSync(dirname(DB_PATH), { recursive: true });

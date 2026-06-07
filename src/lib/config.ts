@@ -12,8 +12,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { writeAtomic } from './atomic.ts';
 import { log } from './log.ts';
+import { HOME, homePath } from './paths.ts';
 
-export const CONFIG_PATH = process.env.MARSCLAW_CONFIG ?? 'data/config.json';
+export const CONFIG_PATH = process.env.MARSCLAW_CONFIG ?? homePath('data/config.json');
 
 export interface MarsclawConfig {
   bot_name: string;
@@ -142,7 +143,7 @@ function defaults(): MarsclawConfig {
     allowed_jids: [],
     allowed_telegram_chats: [],
     allowed_slack_users: [],
-    allowed_paths: [process.cwd()],
+    allowed_paths: [HOME],
     max_sessions: 20,
     idle_ms: 15 * 60_000,
     max_session_age_ms: 4 * 60 * 60_000,

@@ -1,7 +1,11 @@
 #!/usr/bin/env bun
 // marsClaw CLI — subcommand router.
 
-export {};
+import { bootstrapHome } from '../lib/bootstrap.ts';
+
+// Relocate into MARSCLAW_HOME (packaged app) and seed first-run files BEFORE any
+// subcommand runs — every command below resolves `data/...` paths against cwd.
+bootstrapHome();
 
 const cmd = process.argv[2] ?? 'start';
 
@@ -54,6 +58,12 @@ switch (cmd) {
   case 'smoke':
     await import('./smoke.ts');
     break;
+  case 'login':
+    await import('./login.ts');
+    break;
+  case 'apply-setup':
+    await import('./apply-setup.ts');
+    break;
   case 'help':
   case '--help':
   case '-h':
@@ -88,6 +98,8 @@ Commands:
   usage <sub>                 Anthropic spend (today | week | by-thread)
   update [--force]            Pull latest, install deps, restart service
   smoke [prompt]              Fire a synthetic message through the agent end-to-end
+  login [gemini|claude]       Browser login for the agent provider (used by the GUI)
+  apply-setup '<json>'        Persist setup non-interactively from a JSON payload (GUI)
   help                        Print this message
 `);
 }

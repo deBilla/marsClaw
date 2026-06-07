@@ -49,6 +49,21 @@ To start it later:
 bun run start
 ```
 
+### macOS app (no terminal)
+
+For a no-prerequisites install, marsClaw also packages as a notarized **menubar
+app** in a `.dmg` — the Bun engine is bundled and code-signed inside the `.app`,
+so users need no Node, Bun, git, or terminal. Setup, start/stop, and login are
+GUI; writable state lives in `~/Library/Application Support/marsClaw`.
+
+```bash
+bun run build:engine          # compile the engine → dist/engine/<arch>/
+./scripts/package-mac.sh      # sign + notarize + DMG (needs an Apple Developer ID)
+```
+
+See [docs/packaging-mac.md](docs/packaging-mac.md). The menubar app lives in
+[`macapp/`](macapp/).
+
 ## Commands
 
 ```bash

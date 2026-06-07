@@ -15,6 +15,7 @@
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../lib/config.ts';
 import { log } from '../lib/log.ts';
+import { HOME, assetPath } from '../lib/paths.ts';
 
 // Resolve the container CLI to an ABSOLUTE path. Under launchd the service PATH
 // is minimal, so a bare 'docker' may not resolve; check the usual install
@@ -42,7 +43,11 @@ const EGRESS_PORT = Number(process.env.EGRESS_GATEWAY_PORT ?? 8775);
 const IDLE_MS = Number(process.env.MARSCLAW_CONTAINER_IDLE_MS ?? 15 * 60_000);
 const HEALTH_TIMEOUT_MS = 60_000;
 
-const ROOT = process.cwd();
+// Writable root for media, agent-home, logs, and the selectively-mounted
+// persona/memory surface (CLAUDE.md + skills are synced into HOME on boot — see
+// bootstrap.ts — so HOME is the right source for all mounts). Read-only sidecar
+// scripts live under ASSETS instead (assetPath below).
+const ROOT = HOME;
 const SHARED_MEDIA = process.env.MARSCLAW_SHARED_MEDIA ?? `${ROOT}/data/shared`;
 const AGENT_HOME = process.env.MARSCLAW_AGENT_HOME ?? `${ROOT}/data/agent-home`;
 
@@ -71,13 +76,13 @@ function sidecarSpecs(): Sidecar[] {
   return [
     {
       name: 'llm-proxy',
-      args: ['run', 'tools/llm-proxy/proxy.ts'],
+      args: ['run', assetPath('tools/llm-proxy/proxy.ts')],
       env: { LLM_PROXY_HOST: '0.0.0.0', LLM_PROXY_PORT: String(PROXY_PORT) },
       port: PROXY_PORT,
     },
     {
       name: 'mcp-http',
-      args: ['run', 'src/mcp/http-server.ts'],
+      args: ['run', assetPath('src/mcp/http-server.ts')],
       // Per-call Google-write approval (the user's chosen posture) — writes from
       // the container gate on the host even though allow_mutating_tools may be 1.
       env: {
@@ -89,7 +94,7 @@ function sidecarSpecs(): Sidecar[] {
     },
     {
       name: 'egress',
-      args: ['run', 'tools/egress-gateway/gateway.ts'],
+      args: ['run', assetPath('tools/egress-gateway/gateway.ts')],
       env: { EGRESS_GATEWAY_HOST: '0.0.0.0', EGRESS_GATEWAY_PORT: String(EGRESS_PORT) },
       port: EGRESS_PORT,
     },

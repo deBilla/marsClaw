@@ -4,11 +4,11 @@
 // leak to spawned children (MCP server, voice sidecars, agent CLI).
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { log } from './log.ts';
+import { homePath } from './paths.ts';
 
 export function readEnvFile(keys: string[]): Record<string, string> {
-  const envFile = join(process.cwd(), '.env');
+  const envFile = homePath('.env');
   let content: string;
   try {
     content = readFileSync(envFile, 'utf-8');

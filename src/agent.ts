@@ -4,7 +4,6 @@ import type { Channel } from './channels/types.ts';
 import { PROVIDERS, pickProvider } from './providers/registry.ts';
 import { runClaudeSdk } from './providers/claude-sdk.ts';
 import { runContainerTurn } from './providers/container-client.ts';
-import { runGeminiSdk } from './providers/gemini-sdk.ts';
 import { ClaudeHardError } from './providers/claude-error.ts';
 import { startTypingRefresh, stopTypingRefresh, pauseTypingAfterDelivery } from './lib/typing.ts';
 import { log } from './lib/log.ts';
@@ -97,6 +96,10 @@ async function runGemini(
   context: string,
 ): Promise<string> {
   try {
+    // Lazy import: @google/gemini-cli-core pulls in tree-sitter WASM modules that
+    // would otherwise load (and, in a compiled binary, be required from disk) on
+    // every boot — even for the Claude/default path that never touches Gemini.
+    const { runGeminiSdk } = await import('./providers/gemini-sdk.ts');
     return await runGeminiSdk(db, threadId, userText, context, AGENT_TIMEOUT_MS);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

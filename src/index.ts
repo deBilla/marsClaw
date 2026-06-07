@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync } from 'node:fs';
+import { bootstrapHome } from './lib/bootstrap.ts';
 import { initDb } from './db/connection.ts';
 import {
   incrementOutboxAttempt,
@@ -19,6 +19,11 @@ import { startBackupSchedule, stopBackupSchedule } from './lib/backup.ts';
 import { startHealthServer, stopHealthServer } from './lib/health-server.ts';
 import { registerAuditAlerter } from './lib/audit-log.ts';
 import { checkPendingApproval } from './lib/approval-gate.ts';
+
+// Safety net for a direct `bun run src/index.ts`: the CLI router already calls
+// this, and it's idempotent — but chdir/seeding must precede enforceStartupBackoff
+// (which reads data/ relative to cwd) and the loadConfig below.
+bootstrapHome();
 
 // FIRST thing on boot: if we've been crash-looping, sleep before doing
 // anything that might burn API quota. resetCircuitBreaker() in shutdown()
@@ -42,11 +47,6 @@ if (config.runtime === 'container') {
   }
   await startSidecars();
   log.info('runtime=container — sidecars up; agent container starts on first message');
-}
-
-// Ensure local-only memory file exists before any agent runs against it.
-if (!existsSync('MEMORY.md') && existsSync('MEMORY.template.md')) {
-  copyFileSync('MEMORY.template.md', 'MEMORY.md');
 }
 
 const db = initDb();

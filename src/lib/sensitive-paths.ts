@@ -20,19 +20,22 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { realpathSync } from 'node:fs';
+import { homePath } from './paths.ts';
 
-const HOME = homedir();
+const USER_HOME = homedir();
 
-// Resolved once at load against the process cwd (the project root).
+// Resolved once at load. The writable-state entries anchor on the marsClaw
+// HOME root (== cwd in a checkout, ~/Library/Application Support/marsClaw in a
+// packaged app); the credential-store entries anchor on the OS home dir.
 export const SENSITIVE_PATHS: string[] = [
-  path.resolve('.env'), // channel tokens, Google OAuth client id/secret
-  path.resolve('data/config.json'), // allowed_paths, denylist, budget — self-escalation surface
-  path.resolve('data/secrets'), // Linux refresh-token fallback files
-  path.resolve('data/whatsapp-auth'), // Baileys session credentials
-  path.resolve('data/marsclaw.db'), // chat history (not a credential, but contains everything you've ever said)
-  path.join(HOME, '.claude.json'), // Claude Code OAuth / API key
-  path.join(HOME, '.claude'), // Claude Code session transcripts
-  path.join(HOME, '.gemini'), // Gemini CLI credentials
+  homePath('.env'), // channel tokens, Google OAuth client id/secret
+  homePath('data/config.json'), // allowed_paths, denylist, budget — self-escalation surface
+  homePath('data/secrets'), // Linux refresh-token fallback files
+  homePath('data/whatsapp-auth'), // Baileys session credentials
+  homePath('data/marsclaw.db'), // chat history (not a credential, but contains everything you've ever said)
+  path.join(USER_HOME, '.claude.json'), // Claude Code OAuth / API key
+  path.join(USER_HOME, '.claude'), // Claude Code session transcripts
+  path.join(USER_HOME, '.gemini'), // Gemini CLI credentials
 ].map((p) => path.resolve(p));
 
 // Resolve a path through any leading symlinks so a `data/sym -> ~/.claude.json`

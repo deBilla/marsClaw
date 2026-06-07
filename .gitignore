@@ -44,6 +44,11 @@ Thumbs.db
 dist/
 build/
 
+# Swift menubar app (macapp/) build output — source is committed, artifacts are not
+macapp/.build/
+macapp/.swiftpm/
+*.xcodeproj/xcuserdata/
+
 # Local Claude Code config (machine-specific paths/permissions)
 .claude/settings.json
 .claude/settings.local.json

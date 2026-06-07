@@ -1,0 +1,32 @@
+diff --git a/dist/src/policy/sandboxPolicyManager.js b/dist/src/policy/sandboxPolicyManager.js
+index 8e617b5d351950ad90cdacbd5dc4f59b3ee14e79..fc491e27d0b1ea66e5a0e25c453b2e9d8fd43034 100644
+--- a/dist/src/policy/sandboxPolicyManager.js
++++ b/dist/src/policy/sandboxPolicyManager.js
+@@ -70,8 +70,25 @@ export class SandboxPolicyManager {
+                 SandboxPolicyManager._DEFAULT_CONFIG = SandboxTomlSchema.parse(toml.parse(content));
+             }
+             catch (e) {
+-                debugLogger.error(`Failed to parse default sandbox policy: ${e}`);
+-                throw new Error(`Failed to parse default sandbox policy: ${e}`);
++                // marsClaw patch: in a compiled (bun --compile) binary the bundled
++                // policies/sandbox-default.toml isn't on disk, so readFileSync throws
++                // ENOENT. Fall back to the built-in defaults (same values as the
++                // toml) instead of throwing, so Gemini works in the packaged app.
++                debugLogger.error(`Failed to read default sandbox policy, using built-in defaults: ${e}`);
++                SandboxPolicyManager._DEFAULT_CONFIG = {
++                    modes: {
++                        plan: { network: false, readonly: true, approvedTools: [], allowOverrides: true },
++                        default: { network: false, readonly: false, approvedTools: [], allowOverrides: true },
++                        accepting_edits: {
++                            network: false,
++                            readonly: false,
++                            approvedTools: ['sed', 'grep', 'awk', 'perl', 'cat', 'echo'],
++                            allowOverrides: true,
++                        },
++                    },
++                    commands: {},
++                };
++                return SandboxPolicyManager._DEFAULT_CONFIG;
+             }
+         }
+         return SandboxPolicyManager._DEFAULT_CONFIG;

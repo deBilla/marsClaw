@@ -29,6 +29,7 @@
     "usage": "bun run src/cli/index.ts usage",
     "update": "bun run src/cli/index.ts update",
     "smoke": "bun run src/cli/index.ts smoke",
+    "build:engine": "bun run scripts/build-engine.ts",
     "dev": "bun run src/cli/index.ts start",
     "mcp": "bun run src/mcp/server.ts",
     "llm-proxy": "bun run tools/llm-proxy/proxy.ts",
@@ -67,5 +68,8 @@
   },
   "overrides": {
     "google-auth-library": "10.6.2"
+  },
+  "patchedDependencies": {
+    "@google/gemini-cli-core@0.43.0": "patches/@google%2Fgemini-cli-core@0.43.0.patch"
   }
 }
