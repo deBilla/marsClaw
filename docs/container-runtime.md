@@ -134,6 +134,7 @@ gated by approval.
 - `MARSCLAW_EGRESS_ENFORCED` branch + in-process `agentSubprocessEnv` credential
   isolation — dead (only set in a commented plist block).
 - `data-platform` MCP (BigQuery) — wired in-process only; **dropped in container mode**.
-- `docs/vs-nanoclaw.md` / `docs/security.md` describe "no container" + enforced
-  allowlist — now false under `runtime:container`.
+- ~~`docs/vs-nanoclaw.md` / `docs/security.md` describe "no container" + enforced
+  allowlist — now false under `runtime:container`.~~ Fixed — both now document the
+  container runtime and the allowlist's inert-in-container behaviour.
 - `.env.example` lists one key vs ~16 real; `.codebuddy/` committed by accident.
