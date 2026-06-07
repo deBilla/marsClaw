@@ -131,11 +131,26 @@ function isRecoverableSlackSocketError(err: unknown): boolean {
   return /Unhandled event '.*' in state '/.test(msg) && /socket-?mode|SocketModeClient/i.test(stack);
 }
 
+// Throttle the recoverable-Slack-socket warning: under Bun the reconnect race
+// can fire repeatedly, and one warning per occurrence floods the log. Emit at
+// most once per window; count the rest and summarize.
+let slackWarnAt = 0;
+let slackWarnSuppressed = 0;
+const SLACK_WARN_WINDOW_MS = 60_000;
+
 process.on('uncaughtException', (err) => {
   if (isRecoverableSlackSocketError(err)) {
-    log.warn('recoverable Slack socket-mode state error — not crashing; client will reconnect', {
-      err: (err as Error)?.message ?? String(err),
-    });
+    const now = Date.now();
+    if (now - slackWarnAt >= SLACK_WARN_WINDOW_MS) {
+      log.warn('recoverable Slack socket-mode state error — not crashing; client will reconnect', {
+        err: (err as Error)?.message ?? String(err),
+        suppressedSinceLast: slackWarnSuppressed,
+      });
+      slackWarnAt = now;
+      slackWarnSuppressed = 0;
+    } else {
+      slackWarnSuppressed++;
+    }
     return;
   }
   log.fatal('Uncaught exception', { err });

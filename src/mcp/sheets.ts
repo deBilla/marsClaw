@@ -3,11 +3,10 @@
 import { sheetsClient } from '../google/clients.ts';
 import { callMethodPath, rawToolDescription, summarize } from '../google/raw.ts';
 import { blockIfMutationsDisabled, blockIfMutatingMethodDisabled } from '../lib/mutation-gate.ts';
+import { googleErrorMessage } from '../google/errors.ts';
 
 function errMsg(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/No stored credentials|No Google accounts/.test(msg)) return `Sheets not connected: ${msg}`;
-  return `Sheets error: ${msg}`;
+  return googleErrorMessage(err, 'Sheets');
 }
 
 const accountProp = {

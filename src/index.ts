@@ -33,7 +33,13 @@ const config = loadConfig();
 // started on the first inbound message and idle-stopped after ~15 min, so it's
 // off when you're not chatting (nanoclaw-style wake-on-message, one shared box).
 if (config.runtime === 'container') {
-  const { startSidecars } = await import('./providers/container-runtime.ts');
+  const { startSidecars, dockerDaemonError } = await import('./providers/container-runtime.ts');
+  const daemonErr = await dockerDaemonError();
+  if (daemonErr) {
+    // Non-fatal: the daemon may come up shortly (e.g. Colima still booting at
+    // login). The first message retries; surface a clear, actionable warning.
+    log.warn(`runtime=container but ${daemonErr} — agent turns will fail until the daemon is up.`);
+  }
   await startSidecars();
   log.info('runtime=container — sidecars up; agent container starts on first message');
 }

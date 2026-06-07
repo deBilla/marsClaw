@@ -30,15 +30,46 @@ switch (sub) {
   case 'status':
     await status();
     break;
+  case 'enable':
+    await setRuntime('container');
+    break;
+  case 'disable':
+    await setRuntime('in-process');
+    break;
   default:
     console.log(`marsclaw container — agent container runtime helpers
 
 Usage:
+  bun run container enable    Switch to container runtime (writes runtime=container to config.json).
+  bun run container disable   Switch back to in-process runtime.
   bun run container login     Mint a Claude OAuth token (browser) and wire it into the proxy.
                               Log in as the account you want the agent to use.
-  bun run container status    Show configured credential + whether proxy/container are up.
+  bun run container status    Show runtime mode, credential, daemon, and sidecar state.
 `);
     if (sub !== 'help') process.exit(1);
+}
+
+// --- enable / disable ------------------------------------------------------
+async function setRuntime(mode: 'container' | 'in-process'): Promise<void> {
+  const { writeConfig } = await import('../lib/config.ts');
+  writeConfig({ runtime: mode });
+  console.log(`✓ runtime set to "${mode}" in data/config.json.`);
+  if (mode === 'container') {
+    // Mint the MCP shared-secret if absent — the host MCP server requires it
+    // (it binds beyond loopback for the container to reach it). Both the
+    // sidecar and the container read it from here.
+    if (!readEnv('MARSCLAW_MCP_TOKEN')) {
+      upsertEnv('MARSCLAW_MCP_TOKEN', `mcp-${cryptoRandomHex(24)}`);
+      console.log('✓ Minted MARSCLAW_MCP_TOKEN (host MCP auth).');
+    }
+    const { dockerDaemonError } = await import('../providers/container-runtime.ts');
+    const err = await dockerDaemonError();
+    if (err) console.log(`⚠ ${err}`);
+    console.log('Next: ensure Colima starts at login (`brew services start colima`), then restart the bot/service.');
+    console.log('Make sure you have run `bun run container login` and built the image (container/agent-service/Dockerfile).');
+  } else {
+    console.log('Next: restart the bot/service to run the agent in-process again.');
+  }
 }
 
 // --- login -----------------------------------------------------------------
@@ -94,15 +125,37 @@ async function login(): Promise<void> {
 
 // --- status ----------------------------------------------------------------
 async function status(): Promise<void> {
+  const { loadConfig } = await import('../lib/config.ts');
+  const { dockerDaemonError } = await import('../providers/container-runtime.ts');
+  const cfg = loadConfig();
   const oauth = readEnv('CLAUDE_CODE_OAUTH_TOKEN');
   const apiKey = readEnv('ANTHROPIC_API_KEY');
   const session = readEnv('LLM_PROXY_SESSION_TOKEN');
-  console.log('container credential status:');
+  const mcpPort = Number(process.env.MARSCLAW_MCP_HTTP_PORT ?? 8766);
+  const egressPort = Number(process.env.EGRESS_GATEWAY_PORT ?? 8775);
+  const turnUrl = cfg.container_turn_url.replace(/\/+$/, '');
+
+  console.log(`runtime mode:  ${cfg.runtime}${cfg.runtime === 'container' ? '' : '  (set with `bun run container enable`)'}`);
+  const daemonErr = await dockerDaemonError();
+  console.log(`container daemon: ${daemonErr ? 'DOWN — ' + daemonErr : 'up'}`);
+  console.log('credentials:');
   console.log(`  CLAUDE_CODE_OAUTH_TOKEN  ${oauth ? oauth.slice(0, 14) + '… (subscription/OAuth)' : '(unset)'}`);
   console.log(`  ANTHROPIC_API_KEY        ${apiKey ? apiKey.slice(0, 10) + '… (metered)' : '(unset)'}`);
   console.log(`  LLM_PROXY_SESSION_TOKEN  ${session ? session.slice(0, 8) + '… (container holds this)' : '(unset)'}`);
-  const proxyUp = await portUp(PROXY_PORT);
-  console.log(`  llm-proxy :${PROXY_PORT}        ${proxyUp ? 'up' : 'down'}`);
+  console.log('services:');
+  console.log(`  llm-proxy   :${PROXY_PORT}   ${(await portUp(PROXY_PORT)) ? 'up' : 'down'}`);
+  console.log(`  http-mcp    :${mcpPort}   ${(await portUp(mcpPort)) ? 'up' : 'down'}`);
+  console.log(`  egress      :${egressPort}   ${(await portUp(egressPort)) ? 'up' : 'down'}`);
+  console.log(`  agent /turn ${turnUrl}   ${(await healthUp(turnUrl)) ? 'up' : 'down'}`);
+}
+
+async function healthUp(base: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 // --- helpers ---------------------------------------------------------------

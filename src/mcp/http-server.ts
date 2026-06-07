@@ -24,6 +24,18 @@ const PORT = Number(process.env.MARSCLAW_MCP_HTTP_PORT ?? 8766);
 // 0.0.0.0. Auth/allowlist hardening is Phase 3; for now the host is trusted and
 // the port is only meant for the local container bridge.
 const HOST = process.env.MARSCLAW_MCP_HTTP_HOST ?? '0.0.0.0';
+// Shared-secret auth. Because this server binds beyond loopback (so the
+// container can reach it via host.docker.internal), require a bearer token when
+// MARSCLAW_MCP_TOKEN is set. The agent-service sends it as an Authorization
+// header on every MCP call (see container/agent-service mcpServers()). When
+// unset, auth is disabled (back-compat / stdio mode never reaches here).
+const AUTH_TOKEN = process.env.MARSCLAW_MCP_TOKEN ?? '';
+
+function authorized(req: Request): boolean {
+  if (!AUTH_TOKEN) return true; // auth disabled
+  const presented = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? req.headers.get('x-marsclaw-mcp-token');
+  return presented === AUTH_TOKEN;
+}
 
 // Extract <threadId> from /mcp/<threadId> (URL-encoded). Returns null for any
 // other path shape so we can 404 cleanly.
@@ -40,6 +52,9 @@ Bun.serve({
     const url = new URL(req.url);
     if (url.pathname === '/health') {
       return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (!authorized(req)) {
+      return new Response('unauthorized', { status: 401 });
     }
     const threadId = threadIdFromPath(url.pathname);
     if (!threadId) {
@@ -59,5 +74,5 @@ Bun.serve({
   },
 });
 
-log.info('marsclaw HTTP MCP server listening', { host: HOST, port: PORT, path: '/mcp/<threadId>' });
-console.error(`[marsclaw-mcp-http] listening on ${HOST}:${PORT}/mcp/<threadId>`);
+log.info('marsclaw HTTP MCP server listening', { host: HOST, port: PORT, path: '/mcp/<threadId>', auth: AUTH_TOKEN ? 'token' : 'none' });
+console.error(`[marsclaw-mcp-http] listening on ${HOST}:${PORT}/mcp/<threadId> (auth: ${AUTH_TOKEN ? 'token' : 'none'})`);

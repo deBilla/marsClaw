@@ -17,8 +17,8 @@ import {
   query as sdkQuery,
   type McpServerConfig,
   type Query,
-  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+import { MessageStream } from './message-stream.ts';
 import { getThreadSession, setThreadSession, clearThreadSession } from '../db/sessions.ts';
 import { loadHistory } from '../db/messages.ts';
 import { log } from '../lib/log.ts';
@@ -218,40 +218,6 @@ function mcpServers(threadId: string): Record<string, McpServerConfig> {
       env: buildMcpChildEnv(threadId),
     },
   };
-}
-
-// Push-based async iterable. Each push() queues a turn; the SDK consumes
-// them in order and emits a 'result' per turn.
-class MessageStream implements AsyncIterable<SDKUserMessage> {
-  private queue: SDKUserMessage[] = [];
-  private waiting: (() => void) | null = null;
-  private done = false;
-
-  push(text: string): void {
-    this.queue.push({
-      type: 'user',
-      message: { role: 'user', content: text },
-      parent_tool_use_id: null,
-      session_id: '',
-    });
-    this.waiting?.();
-  }
-
-  end(): void {
-    this.done = true;
-    this.waiting?.();
-  }
-
-  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
-    while (true) {
-      while (this.queue.length > 0) yield this.queue.shift()!;
-      if (this.done) return;
-      await new Promise<void>((r) => {
-        this.waiting = r;
-      });
-      this.waiting = null;
-    }
-  }
 }
 
 interface Turn {

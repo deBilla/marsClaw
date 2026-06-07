@@ -24,8 +24,8 @@ import {
   query as sdkQuery,
   type McpServerConfig,
   type Query,
-  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+import { MessageStream } from '../../../src/providers/message-stream.ts';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { buildCanUseTool } from '../../../src/lib/tool-permissions.ts';
@@ -109,36 +109,18 @@ const DISALLOWED_TOOLS = [
 const config = loadConfig();
 const canUseTool = buildCanUseTool(config, { contained: true });
 
+// Shared-secret for the host MCP server (set when MARSCLAW_MCP_TOKEN is passed
+// into the container). Sent as a bearer header on every MCP call.
+const MCP_TOKEN = process.env.MARSCLAW_MCP_TOKEN ?? '';
+
 function mcpServers(threadId: string): Record<string, McpServerConfig> {
   return {
     marsclaw: {
       type: 'http',
       url: `${MCP_BASE_URL}/${encodeURIComponent(threadId)}`,
+      ...(MCP_TOKEN ? { headers: { Authorization: `Bearer ${MCP_TOKEN}` } } : {}),
     } as McpServerConfig,
   };
-}
-
-// --- Push-based message stream (one per warm session) ----------------------
-class MessageStream implements AsyncIterable<SDKUserMessage> {
-  private queue: SDKUserMessage[] = [];
-  private waiting: (() => void) | null = null;
-  private done = false;
-  push(text: string): void {
-    this.queue.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null, session_id: '' });
-    this.waiting?.();
-  }
-  end(): void {
-    this.done = true;
-    this.waiting?.();
-  }
-  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
-    while (true) {
-      while (this.queue.length > 0) yield this.queue.shift()!;
-      if (this.done) return;
-      await new Promise<void>((r) => (this.waiting = r));
-      this.waiting = null;
-    }
-  }
 }
 
 interface Turn {

@@ -16,7 +16,18 @@ import { existsSync } from 'node:fs';
 import { loadConfig } from '../lib/config.ts';
 import { log } from '../lib/log.ts';
 
-const DOCKER = process.env.MARSCLAW_DOCKER_BIN ?? 'docker';
+// Resolve the container CLI to an ABSOLUTE path. Under launchd the service PATH
+// is minimal, so a bare 'docker' may not resolve; check the usual install
+// locations. MARSCLAW_DOCKER_BIN overrides. Works for Colima/Docker/Podman.
+function resolveDockerBin(): string {
+  const override = process.env.MARSCLAW_DOCKER_BIN;
+  if (override) return override;
+  for (const p of ['/opt/homebrew/bin/docker', '/usr/local/bin/docker', '/usr/bin/docker']) {
+    if (existsSync(p)) return p;
+  }
+  return 'docker'; // fall back to PATH lookup
+}
+const DOCKER = resolveDockerBin();
 const IMAGE = process.env.MARSCLAW_AGENT_IMAGE ?? 'marsclaw-agent:latest';
 const CONTAINER_NAME = process.env.MARSCLAW_AGENT_CONTAINER ?? 'marsclaw-agent';
 
@@ -109,7 +120,9 @@ export async function startSidecars(): Promise<void> {
       log.info('sidecar already listening — reusing', { name: s.name, port: s.port });
       continue;
     }
-    const proc = Bun.spawn(['bun', ...s.args], {
+    // Use the SAME bun binary running the broker (process.execPath), not a bare
+    // 'bun' — under launchd the service PATH won't include nvm/asdf bun dirs.
+    const proc = Bun.spawn([process.execPath, ...s.args], {
       env: { ...process.env, ...s.env },
       stdout: Bun.file(`${ROOT}/logs/${s.name}.log`),
       stderr: Bun.file(`${ROOT}/logs/${s.name}.log`),
@@ -145,6 +158,12 @@ function memoryMounts(): string[] {
 
 // --- container lifecycle ---------------------------------------------------
 function runArgs(): string[] {
+  // Egress proxy URL — carries the auth credential in the userinfo when
+  // EGRESS_PROXY_TOKEN is set (proxy-aware clients then send Proxy-Authorization).
+  const egressTok = process.env.EGRESS_PROXY_TOKEN;
+  const egressUrl = egressTok
+    ? `http://marsclaw:${egressTok}@host.docker.internal:${EGRESS_PORT}`
+    : `http://host.docker.internal:${EGRESS_PORT}`;
   return [
     'run', '-d', '--rm', '--name', CONTAINER_NAME,
     '--user', 'bun',
@@ -154,8 +173,8 @@ function runArgs(): string[] {
     '-e', 'AGENT_WORKDIR=/workspace',
     '-e', `ANTHROPIC_BASE_URL=http://host.docker.internal:${PROXY_PORT}`,
     '-e', `ANTHROPIC_API_KEY=${process.env.LLM_PROXY_SESSION_TOKEN ?? ''}`,
-    '-e', `HTTPS_PROXY=http://host.docker.internal:${EGRESS_PORT}`,
-    '-e', `HTTP_PROXY=http://host.docker.internal:${EGRESS_PORT}`,
+    '-e', `HTTPS_PROXY=${egressUrl}`,
+    '-e', `HTTP_PROXY=${egressUrl}`,
     '-e', 'NO_PROXY=host.docker.internal,127.0.0.1,localhost',
     '-e', `MARSCLAW_MCP_BASE_URL=http://host.docker.internal:${MCP_PORT}/mcp`,
     '-e', `MARSCLAW_BOT_NAME=${process.env.MARSCLAW_BOT_NAME ?? 'Mars'}`,
@@ -164,6 +183,8 @@ function runArgs(): string[] {
     // agent wants to deliver via send_file must be written here so the
     // host-side MCP can stat them (path identity across the boundary).
     '-e', `MARSCLAW_SHARED_MEDIA=${SHARED_MEDIA}`,
+    // Shared-secret for the host MCP server (the host MCP requires it when set).
+    ...(process.env.MARSCLAW_MCP_TOKEN ? ['-e', `MARSCLAW_MCP_TOKEN=${process.env.MARSCLAW_MCP_TOKEN}`] : []),
     '-v', `${AGENT_HOME}/.claude:/home/bun/.claude`,
     '-v', `${SHARED_MEDIA}:${SHARED_MEDIA}`,
     ...memoryMounts(),
@@ -186,8 +207,33 @@ export async function ensureContainerUp(): Promise<void> {
   return upPromise;
 }
 
+/**
+ * Is the container daemon reachable? On macOS the daemon lives in a VM
+ * (Colima/Docker Desktop) that must be started separately — under launchd at
+ * boot it may not be up yet. Returns null if reachable, else a clear message.
+ */
+export async function dockerDaemonError(): Promise<string | null> {
+  try {
+    const proc = Bun.spawn([DOCKER, 'info', '--format', '{{.ServerVersion}}'], {
+      stdout: 'ignore',
+      stderr: 'pipe',
+      env: process.env,
+    });
+    const code = await proc.exited;
+    if (code === 0) return null;
+    return (
+      `container daemon not reachable via ${DOCKER}. On macOS start Colima first: ` +
+      `\`brew services start colima\` (persists across reboots) or \`colima start\`.`
+    );
+  } catch (err) {
+    return `cannot exec ${DOCKER}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 async function startContainer(): Promise<void> {
   log.info('cold-starting agent container', { name: CONTAINER_NAME });
+  const daemonErr = await dockerDaemonError();
+  if (daemonErr) throw new Error(daemonErr);
   // Remove any dead container with our name first (rm --rm leftovers).
   await Bun.spawn([DOCKER, 'rm', '-f', CONTAINER_NAME], { stdout: 'ignore', stderr: 'ignore' }).exited;
   const proc = Bun.spawn([DOCKER, ...runArgs()], { stdout: 'pipe', stderr: 'pipe' });

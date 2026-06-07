@@ -3,11 +3,10 @@
 import { driveClient } from '../google/clients.ts';
 import { callMethodPath, rawToolDescription, summarize } from '../google/raw.ts';
 import { blockIfMutatingMethodDisabled } from '../lib/mutation-gate.ts';
+import { googleErrorMessage } from '../google/errors.ts';
 
 function errMsg(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/No stored credentials|No Google accounts/.test(msg)) return `Drive not connected: ${msg}`;
-  return `Drive error: ${msg}`;
+  return googleErrorMessage(err, 'Drive');
 }
 
 const accountProp = {

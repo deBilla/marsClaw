@@ -26,6 +26,34 @@ const HOST = process.env.EGRESS_GATEWAY_HOST ?? '127.0.0.1';
 // Cap on the plaintext request header we buffer before we've parsed it. A
 // client that never sends a complete header line just gets dropped.
 const MAX_HEADER_BYTES = 64 * 1024;
+// Opt-in proxy auth. When set, every request must carry a matching
+// Proxy-Authorization (Bearer <token>, or Basic with the token as the
+// password). Off by default so existing egress keeps working — enable only
+// after verifying the agent's HTTP client forwards proxy credentials from the
+// HTTPS_PROXY URL. See tools/egress-gateway/README and container-runtime.ts.
+const PROXY_TOKEN = process.env.EGRESS_PROXY_TOKEN ?? '';
+
+// Extract the credential from a Proxy-Authorization header value and check it
+// against PROXY_TOKEN. Accepts `Bearer <token>` or `Basic base64(user:token)`.
+function proxyAuthOk(headerText: string): boolean {
+  if (!PROXY_TOKEN) return true;
+  const m = headerText.match(/\r\nProxy-Authorization:\s*(.+)\r\n/i);
+  if (!m) return false;
+  const val = m[1]!.trim();
+  const bearer = val.match(/^Bearer\s+(.+)$/i);
+  if (bearer) return bearer[1] === PROXY_TOKEN;
+  const basic = val.match(/^Basic\s+(.+)$/i);
+  if (basic) {
+    try {
+      const decoded = Buffer.from(basic[1]!, 'base64').toString('utf8');
+      const pass = decoded.slice(decoded.indexOf(':') + 1);
+      return pass === PROXY_TOKEN;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 interface ConnState {
   stage: 'reading-request' | 'connecting' | 'piping' | 'closed';
@@ -157,7 +185,14 @@ function tryHandleRequest(client: Socket<ConnState>): boolean {
   }
 
   if (method.toUpperCase() === 'CONNECT') {
-    // CONNECT host:port — we only need the request line.
+    // When proxy auth is on we need the full header block to read
+    // Proxy-Authorization; otherwise the request line alone suffices.
+    if (PROXY_TOKEN && headerEnd === -1) return false;
+    if (!proxyAuthOk(text)) {
+      deny(client, 407, 'Proxy Authentication Required', target, 'proxy-auth-failed');
+      return true;
+    }
+    // CONNECT host:port.
     const [host, portStr] = target.split(':');
     const port = Number(portStr ?? 443);
     if (!host || !Number.isFinite(port)) {
@@ -170,6 +205,10 @@ function tryHandleRequest(client: Socket<ConnState>): boolean {
 
   // Absolute-form HTTP (GET http://host/path …). Need full headers first.
   if (headerEnd === -1) return false;
+  if (!proxyAuthOk(text)) {
+    deny(client, 407, 'Proxy Authentication Required', target, 'proxy-auth-failed');
+    return true;
+  }
   let url: URL;
   try {
     url = new URL(target);
