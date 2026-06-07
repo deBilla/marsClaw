@@ -43,3 +43,7 @@ Thumbs.db
 # Build artifacts (Bun typecheck doesn't emit, but just in case)
 dist/
 build/
+
+# Local Claude Code config (machine-specific paths/permissions)
+.claude/settings.json
+.claude/settings.local.json
