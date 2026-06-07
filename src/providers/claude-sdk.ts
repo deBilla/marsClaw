@@ -130,13 +130,28 @@ const MCP_ENV_PASSTHROUGH = [
   'KOKORO_URL',
   'KOKORO_VOICE',
   'KOKORO_FORMAT',
+  // GCP service-account JSON path, if the data-platform server is configured to
+  // use one instead of gcloud Application Default Credentials.
+  'GOOGLE_APPLICATION_CREDENTIALS',
 ];
+
+// Name PREFIXES that also pass through. The data-platform server reads many
+// BQ_* knobs (BQ_PROJECT, BQ_LOCATION, BQ_MAX_BYTES_BILLED, BQ_DATASET_ALLOWLIST,
+// …); enumerating each is brittle, and the BQ_ namespace is owned by that
+// server so a prefix match is safe.
+const MCP_ENV_PASSTHROUGH_PREFIXES = ['BQ_'];
 
 function buildMcpChildEnv(threadId: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of MCP_ENV_PASSTHROUGH) {
     const v = process.env[key];
     if (v !== undefined) env[key] = v;
+  }
+  for (const [key, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (MCP_ENV_PASSTHROUGH_PREFIXES.some((p) => key.startsWith(p))) {
+      env[key] = v;
+    }
   }
   env.MARSCLAW_THREAD_ID = threadId;
   return env;
@@ -179,6 +194,13 @@ if (AGENT_SUBPROCESS_ENV) {
   });
 }
 
+// Read-only BigQuery MCP server over the muslim-pro-data-platform project.
+// External to this repo; we point at its venv python by absolute path for the
+// same launchd-PATH reason as above. It authenticates via gcloud Application
+// Default Credentials, which it reads from $HOME/.config/gcloud — so the
+// HOME/PATH passthrough in buildMcpChildEnv is all it needs.
+const DATA_PLATFORM_DIR = '/Users/dimuthu/mp-ai/data-platform-mcp';
+
 function mcpServers(threadId: string): Record<string, McpServerConfig> {
   return {
     marsclaw: {
@@ -187,6 +209,12 @@ function mcpServers(threadId: string): Record<string, McpServerConfig> {
       // lookup breaks under launchd, whose PATH won't include nvm/asdf dirs.
       command: process.execPath,
       args: ['run', 'src/mcp/server.ts'],
+      env: buildMcpChildEnv(threadId),
+    },
+    'data-platform': {
+      type: 'stdio',
+      command: `${DATA_PLATFORM_DIR}/.venv/bin/python`,
+      args: [`${DATA_PLATFORM_DIR}/server.py`],
       env: buildMcpChildEnv(threadId),
     },
   };

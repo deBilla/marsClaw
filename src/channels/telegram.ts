@@ -12,7 +12,10 @@ export interface TelegramOptions extends ChannelInit {
 
 const PREFIX = 'telegram:';
 const TG_MAX = 4000;
-const MEDIA_DIR = process.env.MARSCLAW_TELEGRAM_MEDIA ?? 'data/telegram-media';
+// Under data/shared so the same absolute path is bind-mounted into the agent
+// container (runtime='container'); the `@/abs/path` marker the agent receives
+// then resolves identically inside the box. In-process mode is unaffected.
+const MEDIA_DIR = process.env.MARSCLAW_TELEGRAM_MEDIA ?? 'data/shared/telegram-media';
 // Hard cap on downloaded media size. Telegram itself caps voice notes at
 // ~20 MB and audio files at 50 MB; we set our own ceiling so a hostile sender
 // (combined with no rate limit before this point) can't drive a disk-fill.

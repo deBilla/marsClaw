@@ -25,12 +25,15 @@ import { isSafeAttachmentName } from '../lib/attachment-safety.ts';
 import { gateCommand } from '../lib/command-gate.ts';
 import { RateLimiter } from '../lib/rate-limit.ts';
 import { interruptThread } from '../providers/claude-sdk.ts';
+import { interruptContainerThread } from '../providers/container-client.ts';
 
 const STOP_RE = /^\s*(stop|abort|cancel|wait\s+stop|nvm|nevermind|never\s+mind)\s*[!.\s]*$/i;
 
 const PREFIX = 'whatsapp:';
 const AUTH_DIR = process.env.MARSCLAW_WHATSAPP_AUTH ?? 'data/whatsapp-auth';
-const MEDIA_DIR = process.env.MARSCLAW_WHATSAPP_MEDIA ?? 'data/whatsapp-media';
+// Under data/shared so the same absolute path is bind-mounted into the agent
+// container (runtime='container') and inbound `@/abs/path` markers resolve there.
+const MEDIA_DIR = process.env.MARSCLAW_WHATSAPP_MEDIA ?? 'data/shared/whatsapp-media';
 const VERBOSE = process.env.MARSCLAW_WHATSAPP_VERBOSE === '1';
 // Hard cap on a single inbound attachment. WhatsApp's own limits are ~100 MB
 // for documents and 16 MB for media, but we want a tighter ceiling so a hostile
@@ -362,7 +365,13 @@ export async function createWhatsappChannel(opts: ChannelInit): Promise<Channel>
         // wait for the very turn it's trying to halt.
         if (baseText && STOP_RE.test(baseText)) {
           const threadId = `${PREFIX}${msg.key.remoteJid}`;
-          const interrupted = interruptThread(threadId);
+          // Route the interrupt to wherever the agent actually runs: the
+          // container's /interrupt endpoint in container mode, else the
+          // in-process session teardown.
+          const interrupted =
+            config.runtime === 'container'
+              ? await interruptContainerThread(threadId)
+              : interruptThread(threadId);
           const reply = interrupted ? 'Stopped.' : 'Nothing in progress.';
           log.info('whatsapp interrupt', { jid: msg.key.remoteJid, interrupted });
           try {

@@ -20,8 +20,7 @@ import { DB_PATH } from '../db/connection.ts';
 import { loadConfig } from './config.ts';
 import { audit } from './audit-log.ts';
 import { enqueueApproval, awaitApproval } from './approval-gate.ts';
-
-const THREAD_ID = process.env.MARSCLAW_THREAD_ID ?? '';
+import { currentThreadId } from '../mcp/thread-context.ts';
 
 let _db: Database | null = null;
 function db(): Database {
@@ -54,15 +53,16 @@ function flagRefusal(tool: string): ToolRefusal {
 // agent, authors it). Returns null when approved (caller proceeds), or a
 // refusal when denied/expired.
 async function gateByApproval(tool: string, summary: string): Promise<ToolRefusal | null> {
-  if (!THREAD_ID) {
+  const threadId = currentThreadId();
+  if (!threadId) {
     // No thread context (shouldn't happen in normal operation) — fail closed.
     audit({ tool, decision: 'blocked', layer: 'mutation-gate', reason: 'approval: no thread id' });
     return refusalText(`Refused: "${tool}" needs operator approval but no chat thread is in context.`);
   }
   const conn = db();
-  const { id, nonce, prompt } = enqueueApproval(conn, THREAD_ID, tool, summary);
+  const { id, nonce, prompt } = enqueueApproval(conn, threadId, tool, summary);
   // Deliver the broker-authored prompt via the outbox (same path as send_message).
-  conn.query('INSERT INTO outbox (thread_id, text) VALUES (?, ?)').run(THREAD_ID, prompt);
+  conn.query('INSERT INTO outbox (thread_id, text) VALUES (?, ?)').run(threadId, prompt);
   audit({ tool, decision: 'blocked', layer: 'mutation-gate', subject: nonce, reason: 'awaiting operator approval' });
 
   const verdict = await awaitApproval(conn, id);

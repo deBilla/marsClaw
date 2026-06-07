@@ -27,6 +27,17 @@ await enforceStartupBackoff();
 
 const config = loadConfig();
 
+// Container runtime: the agent runs in an isolated box reached over HTTP. Start
+// the (cheap) host sidecars now — LLM proxy, HTTP MCP, egress gateway — which
+// stay up for the broker's lifetime. The (heavy) container itself is lazily
+// started on the first inbound message and idle-stopped after ~15 min, so it's
+// off when you're not chatting (nanoclaw-style wake-on-message, one shared box).
+if (config.runtime === 'container') {
+  const { startSidecars } = await import('./providers/container-runtime.ts');
+  await startSidecars();
+  log.info('runtime=container — sidecars up; agent container starts on first message');
+}
+
 // Ensure local-only memory file exists before any agent runs against it.
 if (!existsSync('MEMORY.md') && existsSync('MEMORY.template.md')) {
   copyFileSync('MEMORY.template.md', 'MEMORY.md');
@@ -209,6 +220,17 @@ const shutdown = () => {
   shutdownTyping();
   db.close();
   resetCircuitBreaker();
+  // Tear down the agent container + sidecars best-effort, then exit. Give it a
+  // short grace window so `docker rm -f` lands before the process dies; exit
+  // regardless so shutdown never hangs.
+  if (config.runtime === 'container') {
+    void import('./providers/container-runtime.ts')
+      .then((m) => m.shutdownContainerRuntime())
+      .catch(() => {})
+      .finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 4000).unref?.();
+    return;
+  }
   process.exit(0);
 };
 process.on('SIGINT', shutdown);

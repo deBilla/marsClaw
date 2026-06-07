@@ -3,6 +3,7 @@ import { appendMessage } from './db/messages.ts';
 import type { Channel } from './channels/types.ts';
 import { PROVIDERS, pickProvider } from './providers/registry.ts';
 import { runClaudeSdk } from './providers/claude-sdk.ts';
+import { runContainerTurn } from './providers/container-client.ts';
 import { runGeminiSdk } from './providers/gemini-sdk.ts';
 import { ClaudeHardError } from './providers/claude-error.ts';
 import { startTypingRefresh, stopTypingRefresh, pauseTypingAfterDelivery } from './lib/typing.ts';
@@ -47,19 +48,23 @@ export async function handleMessage(
   try {
     let response: string;
     if (provider.name === 'claude') {
-      // SDK path: session resume keeps the transcript on disk; we only send the
-      // new user message (prefixed with ambient context). Sqlite history is
-      // still appended for /status etc.
+      // Two Claude runtimes share one failover path. Container mode runs the
+      // agent unrestricted inside an isolated box over HTTP (Claude-only —
+      // Gemini has no container service); in-process runs the SDK here. Both
+      // return friendly text for soft errors and throw ClaudeHardError for
+      // quota/auth, so the same catch can fail over to Gemini. (Google writes
+      // still gate on the host either way — they escape the box.)
+      const runClaude =
+        config.runtime === 'container'
+          ? () => runContainerTurn(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS)
+          : () => runClaudeSdk(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS);
       try {
-        response = await runClaudeSdk(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS);
+        response = await runClaude();
       } catch (err) {
         if (err instanceof ClaudeHardError && PROVIDERS.gemini.isAuthed()) {
           // Claude is out of quota or auth-broken; fall back to Gemini for
           // this turn so the user still gets an answer.
-          log.warn('claude hard error — failing over to gemini', {
-            thread: threadId,
-            kind: err.kind,
-          });
+          log.warn('claude hard error — failing over to gemini', { thread: threadId, kind: err.kind });
           response = await runGemini(db, threadId, userText, context);
         } else if (err instanceof ClaudeHardError) {
           response = err.friendly;

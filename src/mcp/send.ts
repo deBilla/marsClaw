@@ -1,7 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { DB_PATH } from '../db/connection.ts';
-
-const THREAD_ID = process.env.MARSCLAW_THREAD_ID ?? '';
+import { currentThreadId } from './thread-context.ts';
 
 let _db: Database | null = null;
 function db(): Database {
@@ -28,10 +27,11 @@ export const sendTool = {
     if (!text) {
       return { content: [{ type: 'text', text: 'Error: text is required' }], isError: true };
     }
-    if (!THREAD_ID) {
+    const threadId = currentThreadId();
+    if (!threadId) {
       return { content: [{ type: 'text', text: 'Error: MARSCLAW_THREAD_ID not set' }], isError: true };
     }
-    db().query('INSERT INTO outbox (thread_id, text) VALUES (?, ?)').run(THREAD_ID, text);
+    db().query('INSERT INTO outbox (thread_id, text) VALUES (?, ?)').run(threadId, text);
     return { content: [{ type: 'text', text: 'Queued.' }] };
   },
 };

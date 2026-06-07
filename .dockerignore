@@ -1,0 +1,19 @@
+# Keep the agent-service build context small. Only src/ + container/ are COPYd;
+# everything else is host-only and must NOT enter the image (esp. secrets/data).
+node_modules
+data
+logs
+crashes
+reports
+website
+docs
+wiki
+tests
+.git
+.husky
+.github
+*.log
+.env
+.env.*
+bun.lock
+launchd
