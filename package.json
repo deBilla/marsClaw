@@ -20,6 +20,7 @@
     "voice": "bun run src/cli/index.ts voice",
     "google": "bun run src/cli/index.ts google",
     "service": "bun run src/cli/index.ts service",
+    "container": "bun run src/cli/index.ts container",
     "container:login": "bun run src/cli/index.ts container login",
     "container:status": "bun run src/cli/index.ts container status",
     "path": "bun run src/cli/index.ts path",
