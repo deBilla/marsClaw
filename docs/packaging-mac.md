@@ -106,20 +106,54 @@ provider CLI installed + logged in (`marsclaw login` surfaces a clear hint when
 the bin is missing). Bundling the provider runtime + auth so a fresh Mac needs
 nothing is the last "zero-dependency" piece — see W4 below.
 
-## Open questions / TODO
+## Status & remaining work
 
-- **Clean-machine provider runtime (W4).** Ship/install the `gemini`/`claude` CLI
-  and drive first-run login so a fresh Mac needs nothing pre-installed.
-- **Optional features (W4).** Container mode (Colima + docker) and voice
-  (Python/ffmpeg/whisper/kokoro) are on-demand installs driven from the GUI;
-  their sidecars need compiled-in `_sidecar` subcommands (the loose `tools/*.ts`
-  can't run from a single binary). Not wired yet.
-- **Icon.** Add `Resources/marsClaw.icns` and an `CFBundleIconFile` key.
+### Working today (verified on a Mac that already has the provider CLI)
+- Relocatable engine compiled to one self-contained binary (no Node/Bun/nvm).
+- Menubar app: status, Start/Stop (own `com.marsclaw.agent` LaunchAgent), Setup
+  form, logs/data folder.
+- **Gemini** (free default) and **Claude** both produce real replies in the
+  packaged binary (smoke-tested + live Telegram round-trip).
+- **Telegram** inbound→agent→reply→delivery confirmed end-to-end.
+- **WhatsApp** QR linking via `marsclaw whatsapp link` (GUI "Link WhatsApp" → a
+  Terminal window with the QR).
+- GUI Setup persists config via `marsclaw apply-setup`; `status --json` + `login`
+  back the menubar app; **Start** clears the crash circuit-breaker so corrected
+  config isn't held back by an earlier "no channels" backoff.
 
-### Done since first draft
-- WhatsApp QR linking — `marsclaw whatsapp link` renders the QR; the GUI's "Link
-  WhatsApp (scan QR)…" button opens it in a Terminal window.
-- GUI Setup writes config via `marsclaw apply-setup` (argv); `status --json` and
-  `login` back the menubar app.
-- GUI **Start** clears the crash circuit-breaker so a corrected config isn't held
-  back by an earlier "no channels" backoff.
+### Blocks a true zero-knowledge install on a *fresh* Mac
+1. **Provider CLI bundling (core of W4).** Gemini/Claude work only because the
+   `gemini`/`claude` CLI + auth already exist on the machine. A clean Mac has
+   neither. Need to ship/auto-install the provider CLI and drive first-run login
+   from the GUI. `marsclaw login` already surfaces a clear hint when the bin is
+   missing.
+2. **Notarization (W5 execution).** The `package-mac.sh` pipeline is written and
+   verified through `--adhoc` (assemble + hardened-runtime codesign), but the
+   real `Developer ID → notarytool → staple → .dmg` path has **never run** — it
+   needs an Apple Developer ID ($99/yr). Until then: Gatekeeper warnings, and **no
+   actual `.dmg` has been produced yet**.
+3. **App icon.** Add `Resources/marsClaw.icns` + `CFBundleIconFile` (otherwise the
+   generic app icon is used).
+
+### Optional features (deferrable)
+4. **Container mode** (Colima + docker) and **Voice** (Python/ffmpeg/whisper/
+   kokoro) on-demand installers from the GUI. Both first need compiled-in
+   `marsclaw _sidecar <name>` subcommands — the loose `tools/*.ts` and
+   `src/mcp/http-server.ts` can't run standalone from the single binary.
+
+### Smaller cleanups
+5. **Fresh-clone build gap:** `scripts/build-engine.ts` copies `wiki/` into the
+   assets, but `wiki/` is gitignored — a clean clone would fail the build. Make
+   the copy tolerate a missing `wiki/`.
+6. **Two services:** the dev `com.marsclaw` (repo) and the app's
+   `com.marsclaw.agent` can both be loaded; they'd clash if WhatsApp is enabled in
+   both. Bootout the dev one when using the app.
+
+### Verification caveat
+GUI flows were verified at the **engine layer** (`apply-setup`, `login`,
+`whatsapp link`, `status --json`), not by automated button clicks — the actual
+menubar/SwiftUI interactions were exercised manually.
+
+### Critical path to public release
+**#1 provider bundling → #2 notarization → #3 icon.** Optional features (#4) and
+cleanups (#5–#6) can follow.
