@@ -17,8 +17,8 @@ import {
   query as sdkQuery,
   type McpServerConfig,
   type Query,
-  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+import { MessageStream } from './message-stream.ts';
 import { getThreadSession, setThreadSession, clearThreadSession } from '../db/sessions.ts';
 import { loadHistory } from '../db/messages.ts';
 import { log } from '../lib/log.ts';
@@ -130,13 +130,28 @@ const MCP_ENV_PASSTHROUGH = [
   'KOKORO_URL',
   'KOKORO_VOICE',
   'KOKORO_FORMAT',
+  // GCP service-account JSON path, if the data-platform server is configured to
+  // use one instead of gcloud Application Default Credentials.
+  'GOOGLE_APPLICATION_CREDENTIALS',
 ];
+
+// Name PREFIXES that also pass through. The data-platform server reads many
+// BQ_* knobs (BQ_PROJECT, BQ_LOCATION, BQ_MAX_BYTES_BILLED, BQ_DATASET_ALLOWLIST,
+// …); enumerating each is brittle, and the BQ_ namespace is owned by that
+// server so a prefix match is safe.
+const MCP_ENV_PASSTHROUGH_PREFIXES = ['BQ_'];
 
 function buildMcpChildEnv(threadId: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of MCP_ENV_PASSTHROUGH) {
     const v = process.env[key];
     if (v !== undefined) env[key] = v;
+  }
+  for (const [key, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (MCP_ENV_PASSTHROUGH_PREFIXES.some((p) => key.startsWith(p))) {
+      env[key] = v;
+    }
   }
   env.MARSCLAW_THREAD_ID = threadId;
   return env;
@@ -179,6 +194,13 @@ if (AGENT_SUBPROCESS_ENV) {
   });
 }
 
+// Read-only BigQuery MCP server over the muslim-pro-data-platform project.
+// External to this repo; we point at its venv python by absolute path for the
+// same launchd-PATH reason as above. It authenticates via gcloud Application
+// Default Credentials, which it reads from $HOME/.config/gcloud — so the
+// HOME/PATH passthrough in buildMcpChildEnv is all it needs.
+const DATA_PLATFORM_DIR = '/Users/dimuthu/mp-ai/data-platform-mcp';
+
 function mcpServers(threadId: string): Record<string, McpServerConfig> {
   return {
     marsclaw: {
@@ -189,41 +211,13 @@ function mcpServers(threadId: string): Record<string, McpServerConfig> {
       args: ['run', 'src/mcp/server.ts'],
       env: buildMcpChildEnv(threadId),
     },
+    'data-platform': {
+      type: 'stdio',
+      command: `${DATA_PLATFORM_DIR}/.venv/bin/python`,
+      args: [`${DATA_PLATFORM_DIR}/server.py`],
+      env: buildMcpChildEnv(threadId),
+    },
   };
-}
-
-// Push-based async iterable. Each push() queues a turn; the SDK consumes
-// them in order and emits a 'result' per turn.
-class MessageStream implements AsyncIterable<SDKUserMessage> {
-  private queue: SDKUserMessage[] = [];
-  private waiting: (() => void) | null = null;
-  private done = false;
-
-  push(text: string): void {
-    this.queue.push({
-      type: 'user',
-      message: { role: 'user', content: text },
-      parent_tool_use_id: null,
-      session_id: '',
-    });
-    this.waiting?.();
-  }
-
-  end(): void {
-    this.done = true;
-    this.waiting?.();
-  }
-
-  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
-    while (true) {
-      while (this.queue.length > 0) yield this.queue.shift()!;
-      if (this.done) return;
-      await new Promise<void>((r) => {
-        this.waiting = r;
-      });
-      this.waiting = null;
-    }
-  }
 }
 
 interface Turn {

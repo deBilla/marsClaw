@@ -12,8 +12,8 @@ import { basename, resolve } from 'node:path';
 import { DB_PATH } from '../db/connection.ts';
 import { loadConfig } from '../lib/config.ts';
 import { isSensitivePath } from '../lib/sensitive-paths.ts';
+import { currentThreadId } from './thread-context.ts';
 
-const THREAD_ID = process.env.MARSCLAW_THREAD_ID ?? '';
 const MAX_BYTES = 50 * 1024 * 1024; // 50 MB — WhatsApp's document limit is ~100MB
 
 let _db: Database | null = null;
@@ -54,7 +54,8 @@ export const sendFileTool = {
     if (!rawPath) {
       return { content: [{ type: 'text', text: 'Error: path is required' }], isError: true };
     }
-    if (!THREAD_ID) {
+    const threadId = currentThreadId();
+    if (!threadId) {
       return { content: [{ type: 'text', text: 'Error: MARSCLAW_THREAD_ID not set' }], isError: true };
     }
 
@@ -113,7 +114,7 @@ export const sendFileTool = {
     const displayName = filename || basename(absPath);
     db()
       .query('INSERT INTO outbox (thread_id, text, file_path, file_name) VALUES (?, ?, ?, ?)')
-      .run(THREAD_ID, caption, absPath, displayName);
+      .run(threadId, caption, absPath, displayName);
 
     return {
       content: [

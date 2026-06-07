@@ -15,6 +15,7 @@ import { loadConfig, writeConfig } from '../lib/config.ts';
 import { isValidTimezone } from '../lib/timezone.ts';
 import { isServiceLoaded, stopService, startService } from '../lib/launchd.ts';
 import { findYtDlpPath } from '../mcp/youtube.ts';
+import { askSlack } from './slack-setup.ts';
 
 const rl = createInterface({ input: stdin, output: stdout });
 
@@ -233,13 +234,21 @@ interface ChannelChoices {
   // rather than drop it). Empty means there's nothing to persist.
   telegramToken: string;
   telegramAllowedChats: string[];
+  slackEnabled: boolean;
+  // Same keep-when-disabled semantics as telegramToken.
+  slackBotToken: string;
+  slackAppToken: string;
+  slackAllowedUsers: string[];
   voiceEnabled: boolean;
 }
 
 async function askChannels(
+  botName: string,
+  ownerName: string,
   currentVoice: boolean,
   currentPhone: string,
   currentTgChats: string[],
+  currentSlackUsers: string[],
 ): Promise<ChannelChoices> {
   bold('7. Channels + voice');
 
@@ -321,9 +330,12 @@ async function askChannels(
   }
 
   info('');
+  const slack = await askSlack({ ask, yesNo, info, warn }, botName, ownerName, currentSlackUsers);
+
+  info('');
   info('Voice transcription (local Whisper, ~600MB one-time install).');
   if (currentVoice) info('  Currently enabled in config.');
-  const voiceDefault = currentVoice || whatsappEnabled || telegramEnabled;
+  const voiceDefault = currentVoice || whatsappEnabled || telegramEnabled || slack.slackEnabled;
   let voiceEnabled = await yesNo('  Enable voice?', voiceDefault);
 
   if (voiceEnabled) {
@@ -351,6 +363,7 @@ async function askChannels(
     telegramEnabled,
     telegramToken,
     telegramAllowedChats,
+    ...slack,
     voiceEnabled,
   };
 }
@@ -444,18 +457,20 @@ function seedMemory(ownerName: string, ownerPhone: string, timezone: string, loc
 // (bot_name, allowed_jids, timezone, etc.) lives in data/config.json.
 //
 // We manage exactly: AGENT_PROVIDER, MARSCLAW_WHATSAPP, TELEGRAM_BOT_TOKEN,
-// MARSCLAW_YTDLP_PATH. Slack tokens hand-added by power users are left
-// untouched.
+// SLACK_BOT_TOKEN, SLACK_APP_TOKEN, MARSCLAW_YTDLP_PATH.
 function writeEnv(
   provider: ProviderName,
   whatsappEnabled: boolean,
   telegram: { enabled: boolean; token: string },
+  slack: { enabled: boolean; botToken: string; appToken: string },
   ytdlpPath: string,
 ): void {
   const managed = new Set([
     'AGENT_PROVIDER',
     'MARSCLAW_WHATSAPP',
     'TELEGRAM_BOT_TOKEN',
+    'SLACK_BOT_TOKEN',
+    'SLACK_APP_TOKEN',
     'MARSCLAW_YTDLP_PATH',
   ]);
   const existing = existsSync('.env') ? readFileSync('.env', 'utf-8') : '';
@@ -473,6 +488,15 @@ function writeEnv(
     // (which keys off token presence) ignores it, but the owner can re-enable
     // by uncommenting instead of fetching it from @BotFather again.
     lines.push(`# TELEGRAM_BOT_TOKEN=${telegram.token}`);
+  }
+  // Slack: same keep-when-disabled semantics — the runtime enables the channel
+  // only when BOTH tokens are live.
+  if (slack.enabled && slack.botToken && slack.appToken) {
+    lines.push(`SLACK_BOT_TOKEN=${slack.botToken}`);
+    lines.push(`SLACK_APP_TOKEN=${slack.appToken}`);
+  } else {
+    if (slack.botToken) lines.push(`# SLACK_BOT_TOKEN=${slack.botToken}`);
+    if (slack.appToken) lines.push(`# SLACK_APP_TOKEN=${slack.appToken}`);
   }
   // Pin the absolute path so the MCP subprocess (minimal PATH) finds yt-dlp
   // without falling back to a login-shell lookup. Omitted if not installed —
@@ -504,9 +528,13 @@ function summarize(
   if (ch.telegramEnabled) {
     ok(`allowed:   ${ch.telegramAllowedChats.length ? ch.telegramAllowedChats.join(', ') : 'any sender'}`);
   }
+  ok(`slack:     ${ch.slackEnabled ? 'on' : 'off'}`);
+  if (ch.slackEnabled) {
+    ok(`allowed:   ${ch.slackAllowedUsers.length ? ch.slackAllowedUsers.join(', ') : 'any sender'}`);
+  }
   ok(`voice:     ${ch.voiceEnabled ? 'on' : 'off'}`);
   ok(`yt-dlp:    ${ytdlpPath || 'not installed'}`);
-  if (!ch.whatsappEnabled && !ch.telegramEnabled) {
+  if (!ch.whatsappEnabled && !ch.telegramEnabled && !ch.slackEnabled) {
     warn('No channels enabled. The bot will refuse to start until you wire one up.');
   }
 }
@@ -527,9 +555,12 @@ async function main(): Promise<void> {
   await ensureProviderInstalled(provider);
   await triggerLogin(provider);
   const channels = await askChannels(
+    botName,
+    ownerName,
     current.voice_enabled,
     current.owner_phone,
     current.allowed_telegram_chats,
+    current.allowed_slack_users,
   );
 
   const ytdlpPath = await ensureYtDlp();
@@ -571,6 +602,7 @@ async function main(): Promise<void> {
       provider.name,
       channels.whatsappEnabled,
       { enabled: channels.telegramEnabled, token: channels.telegramToken },
+      { enabled: channels.slackEnabled, botToken: channels.slackBotToken, appToken: channels.slackAppToken },
       ytdlpPath,
     );
     writeConfig({
@@ -583,6 +615,7 @@ async function main(): Promise<void> {
       voice_enabled: channels.voiceEnabled,
       allowed_jids: allowedJids,
       allowed_telegram_chats: channels.telegramAllowedChats,
+      allowed_slack_users: channels.slackAllowedUsers,
       whatsapp_pair_owner: pairOwner,
       whatsapp_pair_code: pairCode,
       whatsapp_pair_expires_at: pairExpiresAt,
@@ -639,7 +672,7 @@ async function main(): Promise<void> {
   // to receive it. (If you run marsClaw as a service, decline this and use
   // `bun run service restart` instead to avoid two instances.)
   bold('Done.');
-  const anyChannel = channels.whatsappEnabled || channels.telegramEnabled;
+  const anyChannel = channels.whatsappEnabled || channels.telegramEnabled || channels.slackEnabled;
   const startPrompt = pairOwner && pairCode ? 'Start the bot now to finish pairing?' : 'Start the bot now?';
   const startNow = anyChannel && (await yesNo(startPrompt, true));
   rl.close();

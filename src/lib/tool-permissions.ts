@@ -92,7 +92,27 @@ function extractPaths(input: Record<string, unknown>): string[] {
   return paths;
 }
 
-export function buildCanUseTool(config: MarsclawConfig): CanUseTool {
+export interface CanUseToolOptions {
+  /**
+   * Contained mode: the agent runs inside an isolated container, so the
+   * container — not these gates — is the security boundary. Bash, filesystem,
+   * and web tools all pass through unrestricted (full capability is the whole
+   * point of runtime='container'). The host-side mutation gate still applies to
+   * Google writes because those escape the box (enforced in the MCP server, not
+   * here). MCP tools are allowed in both modes. The in-process default
+   * (contained=false) keeps every gate exactly as before.
+   */
+  contained?: boolean;
+}
+
+export function buildCanUseTool(config: MarsclawConfig, options: CanUseToolOptions = {}): CanUseTool {
+  if (options.contained) {
+    // The container is the jail. Allow everything; audit for the forensic trail.
+    return async (toolName, input) => {
+      audit({ tool: toolName, decision: 'allow', layer: 'canUseTool', reason: 'contained' });
+      return allowResult(input);
+    };
+  }
   if (process.env.MARSCLAW_TOOL_PERMISSIONS === 'bypass') {
     // Refuse to silently honour the legacy bypass var. Log loud and continue
     // with the real gate; the operator gets a one-time signal and the bot

@@ -1,0 +1,50 @@
+# marsClaw Slack app manifest — manual fallback.
+#
+# Prefer `bun run setup`: the wizard generates a personalized manifest (named
+# after you, e.g. "marsClaw (Dimuthu)") and opens the creation page pre-filled.
+#
+# If several bots share ONE workspace, change `name` and `display_name` below
+# to "marsClaw (<your name>)" so people can tell whose bot is whose.
+#
+# Each user creates their OWN Slack app from this file (one bot per laptop):
+#   1. Open https://api.slack.com/apps?new_app=1
+#   2. Choose "From a manifest", pick your workspace, paste this file, click Create.
+#   3. Settings → Install App → "Install to Workspace" → copy the
+#      Bot User OAuth Token (xoxb-…)  → SLACK_BOT_TOKEN
+#   4. Settings → Basic Information → App-Level Tokens → "Generate Token and Scopes"
+#      → name it "socket", add scope `connections:write`, copy the token (xapp-…)
+#      → SLACK_APP_TOKEN
+#
+display_information:
+  name: marsClaw
+  description: Personal assistant — DM me anything.
+  background_color: "#1a1a2e"
+
+features:
+  bot_user:
+    display_name: marsClaw
+    always_online: true
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write          # send replies
+      - files:write         # send_file / voice notes
+      - im:history          # receive DM messages (required for message.im)
+      - im:read             # list/open DM conversations
+      - im:write            # open a DM to reply
+      - app_mentions:read   # respond to @marsClaw in channels
+      - users:read          # resolve display names
+
+settings:
+  socket_mode_enabled: true # no public URL needed — runs from a laptop
+  event_subscriptions:
+    bot_events:
+      - message.im          # DMs to the bot
+      - app_mention         # @marsClaw in channels
+  org_deploy_enabled: false
+  token_rotation_enabled: false

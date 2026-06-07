@@ -5,11 +5,10 @@
 import { docsClient } from '../google/clients.ts';
 import { callMethodPath, rawToolDescription, summarize } from '../google/raw.ts';
 import { blockIfMutatingMethodDisabled } from '../lib/mutation-gate.ts';
+import { googleErrorMessage } from '../google/errors.ts';
 
 function errMsg(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/No stored credentials|No Google accounts/.test(msg)) return `Docs not connected: ${msg}`;
-  return `Docs error: ${msg}`;
+  return googleErrorMessage(err, 'Docs');
 }
 
 const accountProp = {

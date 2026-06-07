@@ -115,7 +115,44 @@ function dumpCrash(reason: string, err: unknown): string | null {
 // callback is silently swallowed by the runtime — the process keeps going but
 // the conversation hangs. Better to log, dump context, and exit cleanly so
 // launchd respawns under the circuit breaker.
+// @slack/socket-mode's finity state machine throws "Unhandled event '<x>' in
+// state '<connecting|disconnecting>'" during reconnect races — Slack sends a
+// "server explicit disconnect" (e.g. periodic connection refresh, or after
+// connection churn) while a socket is still mid-handshake. It's benign: the
+// client reconnects on its own. Under Bun it's more likely to surface because
+// Bun's ws lacks the 'upgrade'/'unexpected-response' events the client uses.
+// Letting it reach the fatal handler would kill the WHOLE process — taking down
+// every other channel too. Scope the match tightly (message shape AND a
+// socket-mode frame in the stack) so genuine bugs still crash.
+function isRecoverableSlackSocketError(err: unknown): boolean {
+  const e = err as { message?: string; stack?: string } | null;
+  const msg = e?.message ?? '';
+  const stack = e?.stack ?? '';
+  return /Unhandled event '.*' in state '/.test(msg) && /socket-?mode|SocketModeClient/i.test(stack);
+}
+
+// Throttle the recoverable-Slack-socket warning: under Bun the reconnect race
+// can fire repeatedly, and one warning per occurrence floods the log. Emit at
+// most once per window; count the rest and summarize.
+let slackWarnAt = 0;
+let slackWarnSuppressed = 0;
+const SLACK_WARN_WINDOW_MS = 60_000;
+
 process.on('uncaughtException', (err) => {
+  if (isRecoverableSlackSocketError(err)) {
+    const now = Date.now();
+    if (now - slackWarnAt >= SLACK_WARN_WINDOW_MS) {
+      log.warn('recoverable Slack socket-mode state error — not crashing; client will reconnect', {
+        err: (err as Error)?.message ?? String(err),
+        suppressedSinceLast: slackWarnSuppressed,
+      });
+      slackWarnAt = now;
+      slackWarnSuppressed = 0;
+    } else {
+      slackWarnSuppressed++;
+    }
+    return;
+  }
   log.fatal('Uncaught exception', { err });
   const path = dumpCrash('uncaughtException', err);
   if (path) log.fatal('crash dump written', { path });

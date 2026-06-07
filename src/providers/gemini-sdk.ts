@@ -20,18 +20,27 @@ import {
   Config,
   createContentGenerator,
   createContentGeneratorConfig,
+  flattenMemory,
   LlmRole,
   type ContentGenerator,
 } from '@google/gemini-cli-core';
 import type { Content } from '@google/genai';
 import type { Database } from 'bun:sqlite';
+import { existsSync, readFileSync } from 'node:fs';
 import { loadHistory, type HistoryRow } from '../db/messages.ts';
 import { log } from '../lib/log.ts';
 
 const MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 const HISTORY_TURNS = 20;
+const MEMORY_PATH = process.env.MARSCLAW_MEMORY ?? 'MEMORY.md';
 
 let cgPromise: Promise<ContentGenerator> | null = null;
+
+// The marsClaw persona, assembled by Config.initialize() from the GEMINI.md
+// hierarchy (imports expanded). Captured at init so every turn can carry it as
+// a systemInstruction — unlike the gemini CLI, calling generateContent directly
+// does NOT inject GEMINI.md for us, so without this the model runs persona-less.
+let personaMemory = '';
 
 function initContentGenerator(): Promise<ContentGenerator> {
   if (cgPromise) return cgPromise;
@@ -45,9 +54,23 @@ function initContentGenerator(): Promise<ContentGenerator> {
       model: MODEL,
     } as unknown as ConstructorParameters<typeof Config>[0]);
     await config.initialize();
+    // GEMINI.md (+ its @imports) loaded into hierarchical memory during
+    // initialize(). Stash it so buildSystemInstruction() can prepend the persona.
+    try {
+      // getUserMemory() may return a structured HierarchicalMemory; flatten to
+      // the same plain-text form the gemini CLI would feed the model.
+      personaMemory = flattenMemory(config.getUserMemory?.());
+    } catch (err) {
+      log.warn('gemini: could not read user memory from config', { err });
+      personaMemory = '';
+    }
     const cgConfig = await createContentGeneratorConfig(config, AuthType.LOGIN_WITH_GOOGLE);
     const cg = await createContentGenerator(cgConfig, config, `marsclaw-${process.pid}`);
-    log.info('gemini sdk ready', { elapsed_ms: Date.now() - t0, model: MODEL });
+    log.info('gemini sdk ready', {
+      elapsed_ms: Date.now() - t0,
+      model: MODEL,
+      persona_chars: personaMemory.length,
+    });
     return cg;
   })().catch((err) => {
     // Don't cache a failed init — let the next turn retry.
@@ -55,6 +78,35 @@ function initContentGenerator(): Promise<ContentGenerator> {
     throw err;
   });
   return cgPromise;
+}
+
+// System instruction sent on EVERY turn: the marsClaw persona plus the user's
+// durable profile (MEMORY.md). Read fresh each turn — the file is small and
+// local, and re-reading means edits to MEMORY.md take effect without a restart.
+// This is the only path by which MEMORY.md reaches the Gemini model: the
+// in-process generateContent call has no file tools, so the model can't open
+// the file itself the way GEMINI.md's instructions assume.
+function buildSystemInstruction(): string | undefined {
+  const sections: string[] = [];
+  if (personaMemory.trim()) sections.push(personaMemory.trim());
+
+  let profile = '';
+  try {
+    if (existsSync(MEMORY_PATH)) profile = readFileSync(MEMORY_PATH, 'utf-8').trim();
+  } catch (err) {
+    log.warn('gemini: could not read MEMORY.md', { err });
+  }
+  if (profile) {
+    sections.push(
+      `# Long-term memory about the user\n` +
+        `The following is your durable record of who you are talking to (from MEMORY.md). ` +
+        `Treat it as ground truth about the user and their context. Do NOT claim you have no ` +
+        `memory or profile of them — you do, and it is below.\n\n${profile}`,
+    );
+  }
+
+  if (sections.length === 0) return undefined;
+  return sections.join('\n\n---\n\n');
 }
 
 function buildContents(history: HistoryRow[], userText: string, context: string): Content[] {
@@ -84,10 +136,15 @@ export async function runGeminiSdk(
   const cg = await initContentGenerator();
   const history = loadHistory(db, threadId, HISTORY_TURNS);
   const contents = buildContents(history, userText, context);
+  const systemInstruction = buildSystemInstruction();
 
   const t0 = Date.now();
   const reqPromise = cg.generateContent(
-    { model: MODEL, contents },
+    {
+      model: MODEL,
+      contents,
+      ...(systemInstruction ? { config: { systemInstruction } } : {}),
+    },
     `${threadId}-${Date.now()}`,
     LlmRole.MAIN,
   );

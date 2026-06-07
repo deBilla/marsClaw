@@ -112,6 +112,23 @@ export interface MarsclawConfig {
   //                     confirmed via MARSCLAW_EGRESS_ENFORCED (set by the launch
   //                     wrapper). On macOS that means the pf anchor is loaded.
   egress_mode: 'off' | 'gateway';
+  // Where the agent runtime lives.
+  //   'in-process' (default) → the Claude Agent SDK runs in THIS host process,
+  //                     bounded by the capability flags + canUseTool gates above.
+  //                     Capability removal is the security boundary.
+  //   'container'      → the SDK runs in an isolated container reached over an
+  //                     HTTP control channel (POST /turn). The CONTAINER is the
+  //                     security boundary, so inside it the agent runs
+  //                     unrestricted (shell, raw web, file ops). Google writes
+  //                     still gate via the host-side mutation approval because
+  //                     they escape the box. Claude-only; Gemini forces
+  //                     in-process. See container/agent-service/ and
+  //                     src/providers/container-client.ts.
+  runtime: 'in-process' | 'container';
+  // Base URL the host posts turns to when runtime='container'. The agent
+  // container publishes this on host loopback only (the host is its sole
+  // client). Path endpoints: POST /turn, POST /interrupt, GET /health.
+  container_turn_url: string;
 }
 
 function defaults(): MarsclawConfig {
@@ -147,6 +164,8 @@ function defaults(): MarsclawConfig {
     allow_web: false,
     allowed_web_domains: [],
     egress_mode: 'off',
+    runtime: 'in-process',
+    container_turn_url: 'http://127.0.0.1:8770',
   };
 }
 
@@ -286,6 +305,12 @@ export function loadConfig(): MarsclawConfig {
 
   const envEgress = process.env.MARSCLAW_EGRESS_MODE;
   if (envEgress === 'off' || envEgress === 'gateway') cfg.egress_mode = envEgress;
+
+  const envRuntime = process.env.MARSCLAW_RUNTIME;
+  if (envRuntime === 'in-process' || envRuntime === 'container') cfg.runtime = envRuntime;
+
+  const envTurnUrl = process.env.MARSCLAW_CONTAINER_TURN_URL;
+  if (envTurnUrl) cfg.container_turn_url = envTurnUrl;
 
   cached = Object.freeze(cfg);
   return cached;

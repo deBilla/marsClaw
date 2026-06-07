@@ -21,6 +21,9 @@ switch (cmd) {
   case 'whatsapp':
     await import('./whatsapp.ts');
     break;
+  case 'slack':
+    await import('./slack.ts');
+    break;
   case 'voice':
     await import('./voice.ts');
     break;
@@ -29,6 +32,9 @@ switch (cmd) {
     break;
   case 'service':
     await import('./service.ts');
+    break;
+  case 'container':
+    await import('./container.ts');
     break;
   case 'path':
     await import('./path.ts');
@@ -71,9 +77,11 @@ Commands:
   status                      Show provider, db stats, recent activity
   provider [gemini|claude]    Switch agent provider (interactive if no arg)
   whatsapp <sub>              WhatsApp ops (reset | status | clear-media)
+  slack <sub>                 Slack channel (connect | status | disconnect)
   voice <sub>                 Voice (Whisper) ops (install | start | stop | status)
   google <sub>                Google OAuth (login | status | logout | test)
   service <sub>               Manage launchd service (install | uninstall | start | stop | restart | status | logs)
+  container <sub>             Agent container runtime (enable | disable | login | status)
   path <sub>                  Manage agent allowed_paths (list | add <p> | remove <p> | reset)
   backup                      Run a one-shot backup (db + MEMORY.md + whatsapp-auth)
   db <sub>                    DB maintenance (stats | vacuum | integrity)

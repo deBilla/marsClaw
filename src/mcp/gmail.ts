@@ -4,6 +4,7 @@
 
 import { listRecent, search, getMessage, sendMessage, type MessageMeta } from '../google/gmail.ts';
 import { blockIfMutationsDisabled } from '../lib/mutation-gate.ts';
+import { googleErrorMessage } from '../google/errors.ts';
 
 function metaLine(m: MessageMeta): string {
   const date = m.date ? ` [${m.date}]` : '';
@@ -11,11 +12,7 @@ function metaLine(m: MessageMeta): string {
 }
 
 function errMsg(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/No stored credentials|No Google accounts/.test(msg)) {
-    return `Gmail not connected: ${msg}`;
-  }
-  return `Gmail error: ${msg}`;
+  return googleErrorMessage(err, 'Gmail');
 }
 
 const accountProp = {

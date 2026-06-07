@@ -147,6 +147,16 @@ Bun.serve({
       body: bodyText.length > 0 ? bodyText : undefined,
     });
 
+    // Bun's fetch transparently DECOMPRESSES the upstream body when it carries
+    // a Content-Encoding (gzip/br/zstd) — but resp.headers still advertises the
+    // original encoding (and the now-wrong Content-Length). Relaying those
+    // headers verbatim makes the client try to gunzip already-plain bytes and
+    // fail with ZlibError. Strip both so the client reads the body as-is. SSE
+    // (text/event-stream) is unaffected — it isn't content-encoded.
+    const relayHeaders = new Headers(resp.headers);
+    relayHeaders.delete('content-encoding');
+    relayHeaders.delete('content-length');
+
     // Stream the upstream body through unchanged. Critical for SSE responses
     // from /v1/messages — buffering would defeat token-by-token streaming.
     // We tee bytes through a TransformStream to count them for the audit
@@ -180,9 +190,9 @@ Bun.serve({
         bytesOut: 0,
         preview: bodyText.length > 0 ? previewBody(bodyText) : undefined,
       });
-      return new Response(null, { status: resp.status, headers: resp.headers });
+      return new Response(null, { status: resp.status, headers: relayHeaders });
     }
-    return new Response(teed, { status: resp.status, headers: resp.headers });
+    return new Response(teed, { status: resp.status, headers: relayHeaders });
   },
 });
 

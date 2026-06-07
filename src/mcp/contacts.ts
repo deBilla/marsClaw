@@ -2,11 +2,10 @@
 // auto-complete pool) by name or email fragment.
 
 import { searchContacts, type Contact } from '../google/contacts.ts';
+import { googleErrorMessage } from '../google/errors.ts';
 
 function errMsg(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/No stored credentials|No Google accounts/.test(msg)) return `Contacts not connected: ${msg}`;
-  return `Contacts error: ${msg}`;
+  return googleErrorMessage(err, 'Contacts');
 }
 
 function line(c: Contact): string {
