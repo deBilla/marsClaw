@@ -25,6 +25,10 @@ permissions:
 
 jobs:
   release:
+    # Dormant until you opt in: set repository variable MAC_RELEASE_ENABLED=true
+    # (Settings → Secrets and variables → Actions → Variables) AFTER adding the
+    # signing/notary secrets. Keeps tag pushes from triggering a doomed build.
+    if: vars.MAC_RELEASE_ENABLED == 'true'
     runs-on: macos-14 # Apple Silicon; builds a universal app (arm64 + x86_64)
     steps:
       - uses: actions/checkout@v4
