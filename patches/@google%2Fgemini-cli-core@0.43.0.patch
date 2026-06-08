@@ -1,3 +1,24 @@
+diff --git a/dist/src/code_assist/oauth2.js b/dist/src/code_assist/oauth2.js
+index f41a7866e8de2929ae6b0d4d3fa4708f97be50ef..d7686c4ea6ad3061d9e25b51aa73291f4d75bc81 100644
+--- a/dist/src/code_assist/oauth2.js
++++ b/dist/src/code_assist/oauth2.js
+@@ -116,7 +116,15 @@ async function initOauthClient(authType, config) {
+             const { token } = await client.getAccessToken();
+             if (token) {
+                 // This will check with the server to see if it hasn't been revoked.
+-                await client.getTokenInfo(token);
++                // marsClaw patch: inside the isolated container the cached token is
++                // a PLACEHOLDER (the session token); the real Google token lives on
++                // the host gemini-proxy. Phoning Google to validate the placeholder
++                // would 400 and drop us into interactive browser auth. Skip the
++                // revocation check when MARSCLAW_SKIP_TOKENINFO=1 (set only in the
++                // box); real validity is still enforced host-side by the proxy.
++                if (!process.env['MARSCLAW_SKIP_TOKENINFO']) {
++                    await client.getTokenInfo(token);
++                }
+                 if (!userAccountManager.getCachedGoogleAccount()) {
+                     try {
+                         await fetchAndCacheUserInfo(client);
 diff --git a/dist/src/policy/sandboxPolicyManager.js b/dist/src/policy/sandboxPolicyManager.js
 index 8e617b5d351950ad90cdacbd5dc4f59b3ee14e79..fc491e27d0b1ea66e5a0e25c453b2e9d8fd43034 100644
 --- a/dist/src/policy/sandboxPolicyManager.js

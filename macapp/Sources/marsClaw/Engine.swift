@@ -6,6 +6,7 @@ struct EngineStatus: Decodable {
     let provider: String
     let providerAuthed: Bool
     let serviceRunning: Bool
+    let runtime: String?
     let channels: Channels
 
     struct Channels: Decodable {
@@ -36,6 +37,7 @@ struct SetupPayload: Encodable {
     var whatsappEnabled: Bool?
     var ownerPhone: String?
     var voiceEnabled: Bool?
+    var runtime: String?
 }
 
 // Locates the bundled engine binary + read-only assets, owns the writable HOME

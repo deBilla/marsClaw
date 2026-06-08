@@ -17,9 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Deps layer (cached independently of source). The agent-service imports only
-# the agent SDK + pino (via the few src/lib modules it reuses).
+# Deps layer (cached independently of source). The agent-service imports the
+# Claude SDK (index.ts) and @google/gemini-cli-core (gemini.ts) + pino. The
+# gemini-cli-core patch (skips the container-irrelevant token-revocation check)
+# must be present before install so bun can apply patchedDependencies.
 COPY container/agent-service/package.json /app/package.json
+COPY patches /app/patches
 RUN bun install
 
 # Source. Structure is preserved so the agent-service's ../../../src imports
@@ -35,4 +38,7 @@ RUN mkdir -p /home/bun/.claude /workspace && chown -R bun:bun /home/bun /workspa
 
 USER bun
 
-ENTRYPOINT ["bun", "run", "/app/container/agent-service/src/index.ts"]
+# Provider-aware entrypoint: the same image serves both runtimes. AGENT_PROVIDER
+# (passed in by the host) selects the Claude SDK loop (index.ts) or the Gemini
+# loop (gemini.ts). Defaults to Claude.
+ENTRYPOINT ["sh", "-c", "if [ \"$AGENT_PROVIDER\" = gemini ]; then exec bun run /app/container/agent-service/src/gemini.ts; else exec bun run /app/container/agent-service/src/index.ts; fi"]

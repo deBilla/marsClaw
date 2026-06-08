@@ -36,6 +36,7 @@ mkdir -p "$SHARED_MEDIA" "$AGENT_HOME/.claude"
 # never .env or data/. RO for instructions/skills, RW for memory/wiki. Added
 # only if the host path exists.
 CLAUDE_MD_MOUNT=""; [ -f "$ROOT/CLAUDE.md" ] && CLAUDE_MD_MOUNT="-v $ROOT/CLAUDE.md:/workspace/CLAUDE.md:ro"
+GEMINI_MD_MOUNT=""; [ -f "$ROOT/GEMINI.md" ] && GEMINI_MD_MOUNT="-v $ROOT/GEMINI.md:/workspace/GEMINI.md:ro"
 MEMORY_MD_MOUNT=""; [ -f "$ROOT/MEMORY.md" ] && MEMORY_MD_MOUNT="-v $ROOT/MEMORY.md:/workspace/MEMORY.md"
 SKILLS_MOUNT="";    [ -d "$ROOT/skills" ]    && SKILLS_MOUNT="-v $ROOT/skills:/workspace/skills:ro"
 WIKI_MOUNT="";      [ -d "$ROOT/wiki" ]      && WIKI_MOUNT="-v $ROOT/wiki:/workspace/wiki"
@@ -43,8 +44,18 @@ WIKI_MOUNT="";      [ -d "$ROOT/wiki" ]      && WIKI_MOUNT="-v $ROOT/wiki:/works
 # --- env / secrets (from .env) --------------------------------------------
 # shellcheck disable=SC1091
 set -a; [ -f .env ] && . ./.env; set +a
-: "${CLAUDE_CODE_OAUTH_TOKEN:?set CLAUDE_CODE_OAUTH_TOKEN in .env (claude setup-token)}"
 : "${LLM_PROXY_SESSION_TOKEN:?set LLM_PROXY_SESSION_TOKEN in .env}"
+
+# Provider selects the LLM proxy + container credential wiring. Claude needs an
+# OAuth token in .env; Gemini brokers ~/.gemini creds host-side (no token in .env).
+PROVIDER="${AGENT_PROVIDER:-claude}"
+if [ "$PROVIDER" = "gemini" ]; then
+  PROXY_SCRIPT="tools/llm-proxy/gemini.ts"
+  [ -f "$HOME/.gemini/oauth_creds.json" ] || { echo "[run] gemini: log in first (no ~/.gemini/oauth_creds.json)"; exit 1; }
+else
+  PROXY_SCRIPT="tools/llm-proxy/proxy.ts"
+  : "${CLAUDE_CODE_OAUTH_TOKEN:?set CLAUDE_CODE_OAUTH_TOKEN in .env (claude setup-token)}"
+fi
 
 log() { printf '[run] %s\n' "$*" >&2; }
 
@@ -61,7 +72,7 @@ start_sidecar() {
 mkdir -p "$ROOT/logs"
 
 start_sidecar llm-proxy "$PROXY_PORT" \
-  env LLM_PROXY_HOST=0.0.0.0 LLM_PROXY_PORT="$PROXY_PORT" bun run tools/llm-proxy/proxy.ts
+  env LLM_PROXY_HOST=0.0.0.0 LLM_PROXY_PORT="$PROXY_PORT" bun run "$PROXY_SCRIPT"
 start_sidecar mcp-http "$MCP_PORT" \
   env MARSCLAW_MCP_HTTP_HOST=0.0.0.0 MARSCLAW_MCP_HTTP_PORT="$MCP_PORT" bun run src/mcp/http-server.ts
 start_sidecar egress "$EGRESS_PORT" \
@@ -81,8 +92,10 @@ log "starting agent container '$CONTAINER_NAME' (detached)"
   -e HOME=/home/bun \
   -e AGENT_SERVICE_PORT="$TURN_PORT" \
   -e AGENT_WORKDIR=/workspace \
-  -e ANTHROPIC_BASE_URL="http://host.docker.internal:${PROXY_PORT}" \
-  -e ANTHROPIC_API_KEY="$LLM_PROXY_SESSION_TOKEN" \
+  -e AGENT_PROVIDER="$PROVIDER" \
+  $([ "$PROVIDER" = gemini ] \
+      && echo "-e CODE_ASSIST_ENDPOINT=http://host.docker.internal:${PROXY_PORT} -e MARSCLAW_GEMINI_SESSION_TOKEN=${LLM_PROXY_SESSION_TOKEN} -e MARSCLAW_SKIP_TOKENINFO=1" \
+      || echo "-e ANTHROPIC_BASE_URL=http://host.docker.internal:${PROXY_PORT} -e ANTHROPIC_API_KEY=${LLM_PROXY_SESSION_TOKEN}") \
   -e HTTPS_PROXY="http://host.docker.internal:${EGRESS_PORT}" \
   -e HTTP_PROXY="http://host.docker.internal:${EGRESS_PORT}" \
   -e NO_PROXY="host.docker.internal,127.0.0.1,localhost" \
@@ -93,7 +106,7 @@ log "starting agent container '$CONTAINER_NAME' (detached)"
   ${MARSCLAW_MCP_TOKEN:+-e MARSCLAW_MCP_TOKEN="${MARSCLAW_MCP_TOKEN}"} \
   -v "${AGENT_HOME}/.claude:/home/bun/.claude" \
   -v "${SHARED_MEDIA}:${SHARED_MEDIA}" \
-  ${CLAUDE_MD_MOUNT} ${MEMORY_MD_MOUNT} ${SKILLS_MOUNT} ${WIKI_MOUNT} \
+  ${CLAUDE_MD_MOUNT} ${GEMINI_MD_MOUNT} ${MEMORY_MD_MOUNT} ${SKILLS_MOUNT} ${WIKI_MOUNT} \
   "$IMAGE" >/dev/null
 
 log "waiting for /turn health on :${TURN_PORT} …"

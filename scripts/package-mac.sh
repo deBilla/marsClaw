@@ -59,6 +59,14 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/engine"
 cp "$SWIFT_BIN" "$APP/Contents/MacOS/marsClaw"
 cp "$INFO_PLIST" "$APP/Contents/Info.plist"
+# App icon: generate marsClaw.icns from assets/logo.png (matches Info.plist's
+# CFBundleIconFile). Skipped gracefully if the source PNG is absent.
+if [ -f "$ROOT/assets/logo.png" ]; then
+  "$ROOT/scripts/make-icns.sh" "$ROOT/assets/logo.png" "$DIST/marsClaw.icns"
+  cp "$DIST/marsClaw.icns" "$APP/Contents/Resources/marsClaw.icns"
+else
+  echo "  (no assets/logo.png — building without an app icon)"
+fi
 # Embed each per-arch engine dir (binary + assets) under Resources/engine/<arch>.
 # Copy arch dirs explicitly so stray files at dist/engine root never leak in.
 # Use ditto, not `cp -R`: the Bun-compiled binary carries a system

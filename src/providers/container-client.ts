@@ -10,7 +10,7 @@
 
 import type { Database } from 'bun:sqlite';
 import { getThreadSession, setThreadSession, clearThreadSession } from '../db/sessions.ts';
-import { loadHistory } from '../db/messages.ts';
+import { loadHistory, type HistoryRow } from '../db/messages.ts';
 import { loadConfig } from '../lib/config.ts';
 import { log } from '../lib/log.ts';
 import { ensureContainerUp, recordActivity } from './container-runtime.ts';
@@ -84,6 +84,14 @@ function prependHistory(db: Database, threadId: string, userText: string): strin
   return `${lines.join('\n')}${userText}`;
 }
 
+// Prior turns as STRUCTURED rows (excluding the just-appended current user
+// message) for providers that take real multi-turn history (the Gemini box),
+// rather than the single text blob prependHistory builds for the Claude box.
+function structuredHistory(db: Database, threadId: string): HistoryRow[] {
+  const rows = loadHistory(db, threadId, SEED_TURNS + 1);
+  return rows.length > 0 && rows[rows.length - 1]?.role === 'user' ? rows.slice(0, -1) : rows;
+}
+
 interface TurnResponse {
   reply?: string;
   sessionId?: string | null;
@@ -111,12 +119,18 @@ export async function runContainerTurn(
   recordActivity();
 
   const resumeId = getThreadSession(db, threadId, PROVIDER_NAME);
-  // No prior container session → seed history into the message (one-time cost).
-  let postText = resumeId ? userText : prependHistory(db, threadId, userText);
-  let postResume = resumeId;
+  // The Gemini box keeps no resumable session and no DB, so pass prior turns as
+  // STRUCTURED multi-turn history (sharper than folding them into one blob) and
+  // send only the live message as text. Claude keeps the blob path: its SDK
+  // resumes its own transcript, and a fresh box gets history folded into the
+  // message (it ignores the `history` field).
+  const gemini = loadConfig().agent_provider === 'gemini';
+  let postText = gemini ? userText : resumeId ? userText : prependHistory(db, threadId, userText);
+  const history = gemini ? structuredHistory(db, threadId) : undefined;
+  let postResume = gemini ? null : resumeId;
   const deadline = Date.now() + timeoutMs; // overall budget incl. retries
 
-  let data = await postTurn(base, threadId, postText, timeoutMs, postResume);
+  let data = await postTurn(base, threadId, postText, timeoutMs, postResume, history);
 
   // Stale resume id (e.g. a session from a prior in-process run, or purged on
   // the container side) → clear it and retry once as a fresh session, seeding
@@ -126,7 +140,7 @@ export async function runContainerTurn(
     clearThreadSession(db, threadId);
     postText = prependHistory(db, threadId, userText);
     postResume = null;
-    data = await postTurn(base, threadId, postText, timeoutMs, postResume);
+    data = await postTurn(base, threadId, postText, timeoutMs, postResume, history);
   }
 
   // Retry transient upstream failures (rate limit / 5xx / network) with backoff.
@@ -149,7 +163,7 @@ export async function runContainerTurn(
     await new Promise((r) => setTimeout(r, wait));
     backoff = Math.min(backoff * 2, RETRY_MAX_MS);
     recordActivity(); // keep the container warm across the wait
-    data = await postTurn(base, threadId, postText, timeoutMs, postResume);
+    data = await postTurn(base, threadId, postText, timeoutMs, postResume, history);
   }
 
   // Thrown/HTTP error from the turn → ClaudeSoftError (synthetic, not persisted)
@@ -179,6 +193,7 @@ async function postTurn(
   text: string,
   timeoutMs: number,
   resumeId: string | null,
+  history?: HistoryRow[],
 ): Promise<TurnResponse> {
   const controller = new AbortController();
   const abortTimer = setTimeout(() => controller.abort(), timeoutMs + 30_000);
@@ -186,7 +201,9 @@ async function postTurn(
     const res = await fetch(`${base}/turn`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ threadId, text, timeoutMs, resumeId }),
+      // `history` is used by the Gemini box for structured multi-turn context;
+      // the Claude box ignores it (resumes its own transcript).
+      body: JSON.stringify({ threadId, text, timeoutMs, resumeId, history }),
       signal: controller.signal,
     });
     const data = (await res.json().catch(() => ({}))) as TurnResponse;

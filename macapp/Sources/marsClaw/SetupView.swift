@@ -18,6 +18,7 @@ struct SetupView: View {
     @State private var whatsappEnabled = false
     @State private var ownerPhone = ""
     @State private var voiceEnabled = false
+    @State private var containerRuntime = false
 
     @State private var busy = false
     @State private var message = ""
@@ -55,6 +56,27 @@ struct SetupView: View {
                         "login \(provider)",
                         note: "Logging in to \(provider) — complete the flow in your browser.")
                     message = "A Terminal window opened for \(provider) login — finish there, then come back and Save."
+                }
+            }
+
+            Section("Runtime") {
+                Toggle("Run the agent in an isolated container", isOn: $containerRuntime)
+                if containerRuntime {
+                    Text("Container mode sandboxes the agent via Colima + Docker — works with "
+                        + "Claude or Gemini. Your provider credentials stay on this Mac (brokered "
+                        + "to the box), never inside it. Requires Colima + Docker installed; the "
+                        + "agent image builds on first use. Make sure you've logged in to your "
+                        + "chosen provider above.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Check container setup…") {
+                        engine.runInTerminal(
+                            "container status",
+                            note: "Checking container mode — Docker daemon, credentials, and sidecars.")
+                        message = "A Terminal window opened with container status. Install Colima/Docker if it reports the daemon is down, then Save."
+                    }
+                } else {
+                    Text("Default: runs in-process — no extra dependencies. Works with Gemini or Claude.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -109,6 +131,7 @@ struct SetupView: View {
         provider = s.provider
         whatsappEnabled = s.channels.whatsapp
         voiceEnabled = s.channels.voice
+        containerRuntime = (s.runtime == "container")
     }
 
     private func save() {
@@ -121,7 +144,8 @@ struct SetupView: View {
             telegramToken: telegramToken.isEmpty ? nil : telegramToken,
             whatsappEnabled: whatsappEnabled,
             ownerPhone: ownerPhone.isEmpty ? nil : ownerPhone,
-            voiceEnabled: voiceEnabled)
+            voiceEnabled: voiceEnabled,
+            runtime: containerRuntime ? "container" : "in-process")
         busy = true
         message = "Saving…"
         engine.applySetup(payload) { ok, out in

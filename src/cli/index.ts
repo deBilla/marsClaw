@@ -3,6 +3,37 @@
 
 import { bootstrapHome } from '../lib/bootstrap.ts';
 
+// Compiled-in sidecars (runtime='container'). The packaged single binary can't
+// `bun run tools/*.ts` — there's no bun and the scripts aren't on disk — so the
+// host sidecars (LLM proxy, HTTP MCP, egress) run as `marsclaw _sidecar <name>`,
+// spawned by container-runtime.ts. Handled FIRST and OUTSIDE bootstrapHome:
+// sidecars are standalone servers that must not chdir/seed HOME. Literal import
+// paths so `bun --compile` bundles each module; every one starts its own
+// Bun.serve on import and keeps the process alive.
+if (process.argv[2] === '_sidecar') {
+  const name = process.argv[3];
+  switch (name) {
+    case 'llm-proxy-anthropic':
+      await import('../../tools/llm-proxy/proxy.ts');
+      break;
+    case 'llm-proxy-gemini':
+      await import('../../tools/llm-proxy/gemini.ts');
+      break;
+    case 'mcp-http':
+      await import('../mcp/http-server.ts');
+      break;
+    case 'egress':
+      await import('../../tools/egress-gateway/gateway.ts');
+      break;
+    default:
+      console.error(`Unknown sidecar: ${name}`);
+      process.exit(1);
+  }
+} else {
+  await runCli();
+}
+
+async function runCli(): Promise<void> {
 // Relocate into MARSCLAW_HOME (packaged app) and seed first-run files BEFORE any
 // subcommand runs — every command below resolves `data/...` paths against cwd.
 bootstrapHome();
@@ -73,6 +104,7 @@ switch (cmd) {
     console.error(`Unknown command: ${cmd}\n`);
     printHelp();
     process.exit(1);
+}
 }
 
 function printHelp(): void {

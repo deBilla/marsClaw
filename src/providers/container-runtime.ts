@@ -15,7 +15,7 @@
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../lib/config.ts';
 import { log } from '../lib/log.ts';
-import { HOME, assetPath } from '../lib/paths.ts';
+import { HOME } from '../lib/paths.ts';
 
 // Resolve the container CLI to an ABSOLUTE path. Under launchd the service PATH
 // is minimal, so a bare 'docker' may not resolve; check the usual install
@@ -72,17 +72,34 @@ interface Sidecar {
   port: number;
 }
 
+// How to re-invoke THIS CLI to run a compiled-in sidecar (`marsclaw _sidecar
+// <name>`). In a `bun --compile` binary the embedded entry lives in the virtual
+// filesystem, so `Bun.main` is `/$bunfs/root/index.js` — the reliable signal we
+// ARE the standalone executable. Then run it directly ([execPath, _sidecar,
+// name]). In dev, Bun.main is the real on-disk entry, so we invoke bun with it
+// ([bun, index.ts, _sidecar, name]). Passing Bun.main in the compiled case would
+// add a stray argv the child mis-reads as the subcommand → it'd print help.
+function selfExec(): string[] {
+  const compiled = Bun.main.startsWith('/$bunfs');
+  return compiled ? [process.execPath] : [process.execPath, Bun.main];
+}
+
 function sidecarSpecs(): Sidecar[] {
+  // The LLM credential-isolation proxy is provider-specific: Anthropic key-swap
+  // (llm-proxy-anthropic) vs Google Code Assist OAuth broker (llm-proxy-gemini).
+  // Only the configured provider's proxy runs; both bind the same port.
+  const provider = loadConfig().agent_provider;
+  const proxyName = provider === 'gemini' ? 'llm-proxy-gemini' : 'llm-proxy-anthropic';
   return [
     {
       name: 'llm-proxy',
-      args: ['run', assetPath('tools/llm-proxy/proxy.ts')],
+      args: ['_sidecar', proxyName],
       env: { LLM_PROXY_HOST: '0.0.0.0', LLM_PROXY_PORT: String(PROXY_PORT) },
       port: PROXY_PORT,
     },
     {
       name: 'mcp-http',
-      args: ['run', assetPath('src/mcp/http-server.ts')],
+      args: ['_sidecar', 'mcp-http'],
       // Per-call Google-write approval (the user's chosen posture) — writes from
       // the container gate on the host even though allow_mutating_tools may be 1.
       env: {
@@ -94,7 +111,7 @@ function sidecarSpecs(): Sidecar[] {
     },
     {
       name: 'egress',
-      args: ['run', assetPath('tools/egress-gateway/gateway.ts')],
+      args: ['_sidecar', 'egress'],
       env: { EGRESS_GATEWAY_HOST: '0.0.0.0', EGRESS_GATEWAY_PORT: String(EGRESS_PORT) },
       port: EGRESS_PORT,
     },
@@ -103,31 +120,43 @@ function sidecarSpecs(): Sidecar[] {
 
 const sidecarProcs: { name: string; proc: ReturnType<typeof Bun.spawn> }[] = [];
 
-async function portListening(port: number): Promise<boolean> {
+// Kill anything listening on a sidecar port before we (re)start ours. The broker
+// is the SOLE owner of these ports; a listener here is almost always a sidecar
+// orphaned by an unclean shutdown of a prior broker — or the WRONG provider's
+// proxy (e.g. a stale Anthropic proxy answering Gemini Code Assist calls with
+// 404). The old code "reused" such a listener and silently served the wrong
+// backend; freeing the port guarantees the correct, current sidecar runs.
+async function freePort(port: number): Promise<void> {
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1000) });
-    void r;
-    return true;
-  } catch (err) {
-    // A refused connection means nothing is listening; any HTTP-level response
-    // (even an error status, which doesn't throw) means something is there.
-    return !/ECONNREFUSED|Unable to connect|fetch failed|refused/i.test(
-      err instanceof Error ? err.message : String(err),
-    );
+    const proc = Bun.spawn(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    const out = (await new Response(proc.stdout).text()).trim();
+    await proc.exited;
+    const pids = out.split(/\s+/).filter(Boolean);
+    for (const pid of pids) {
+      try {
+        process.kill(Number(pid), 'SIGKILL');
+        log.warn('freed stale sidecar port', { port, pid: Number(pid) });
+      } catch {
+        /* already gone */
+      }
+    }
+    if (pids.length) await new Promise((r) => setTimeout(r, 300)); // let the port release
+  } catch {
+    /* lsof unavailable (non-macOS) — best effort; the spawn below may still fail loudly */
   }
 }
 
-/** Start the host sidecars the container depends on (idempotent — skips any
- *  port already listening, e.g. from a manual run.sh). */
+/** Start the host sidecars the container depends on. Frees each port first so a
+ *  stale/wrong sidecar from a prior run can't be silently reused. */
 export async function startSidecars(): Promise<void> {
   for (const s of sidecarSpecs()) {
-    if (await portListening(s.port)) {
-      log.info('sidecar already listening — reusing', { name: s.name, port: s.port });
-      continue;
-    }
+    await freePort(s.port);
     // Use the SAME bun binary running the broker (process.execPath), not a bare
     // 'bun' — under launchd the service PATH won't include nvm/asdf bun dirs.
-    const proc = Bun.spawn([process.execPath, ...s.args], {
+    const proc = Bun.spawn([...selfExec(), ...s.args], {
       env: { ...process.env, ...s.env },
       stdout: Bun.file(`${ROOT}/logs/${s.name}.log`),
       stderr: Bun.file(`${ROOT}/logs/${s.name}.log`),
@@ -149,6 +178,7 @@ export async function startSidecars(): Promise<void> {
 function memoryMounts(): string[] {
   const specs: { host: string; container: string; ro: boolean }[] = [
     { host: `${ROOT}/CLAUDE.md`, container: '/workspace/CLAUDE.md', ro: true },
+    { host: `${ROOT}/GEMINI.md`, container: '/workspace/GEMINI.md', ro: true },
     { host: `${ROOT}/MEMORY.md`, container: '/workspace/MEMORY.md', ro: false },
     { host: `${ROOT}/skills`, container: '/workspace/skills', ro: true },
     { host: `${ROOT}/wiki`, container: '/workspace/wiki', ro: false },
@@ -169,6 +199,27 @@ function runArgs(): string[] {
   const egressUrl = egressTok
     ? `http://marsclaw:${egressTok}@host.docker.internal:${EGRESS_PORT}`
     : `http://host.docker.internal:${EGRESS_PORT}`;
+  // Provider-specific credential wiring. The box never holds a real key: it
+  // presents the rotatable session token, which the host proxy swaps for the
+  // real credential. Claude → ANTHROPIC_BASE_URL key-swap; Gemini → Code Assist
+  // endpoint override + placeholder OAuth (the box writes oauth_creds.json with
+  // the session token; MARSCLAW_SKIP_TOKENINFO lets the SDK accept it).
+  const provider = loadConfig().agent_provider;
+  const session = process.env.LLM_PROXY_SESSION_TOKEN ?? '';
+  const providerEnv =
+    provider === 'gemini'
+      ? [
+          '-e', 'AGENT_PROVIDER=gemini',
+          '-e', `CODE_ASSIST_ENDPOINT=http://host.docker.internal:${PROXY_PORT}`,
+          '-e', `MARSCLAW_GEMINI_SESSION_TOKEN=${session}`,
+          '-e', 'MARSCLAW_SKIP_TOKENINFO=1',
+          ...(process.env.GEMINI_MODEL ? ['-e', `GEMINI_MODEL=${process.env.GEMINI_MODEL}`] : []),
+        ]
+      : [
+          '-e', 'AGENT_PROVIDER=claude',
+          '-e', `ANTHROPIC_BASE_URL=http://host.docker.internal:${PROXY_PORT}`,
+          '-e', `ANTHROPIC_API_KEY=${session}`,
+        ];
   return [
     'run', '-d', '--rm', '--name', CONTAINER_NAME,
     '--user', 'bun',
@@ -176,8 +227,7 @@ function runArgs(): string[] {
     '-e', 'HOME=/home/bun',
     '-e', `AGENT_SERVICE_PORT=${TURN_PORT}`,
     '-e', 'AGENT_WORKDIR=/workspace',
-    '-e', `ANTHROPIC_BASE_URL=http://host.docker.internal:${PROXY_PORT}`,
-    '-e', `ANTHROPIC_API_KEY=${process.env.LLM_PROXY_SESSION_TOKEN ?? ''}`,
+    ...providerEnv,
     '-e', `HTTPS_PROXY=${egressUrl}`,
     '-e', `HTTP_PROXY=${egressUrl}`,
     '-e', 'NO_PROXY=host.docker.internal,127.0.0.1,localhost',

@@ -35,6 +35,7 @@ if (process.argv.includes('--json')) {
     provider: providerName,
     providerAuthed: provider ? provider.isAuthed() : false,
     serviceRunning: isServiceLoaded(),
+    runtime: cfg.runtime,
     channels: {
       telegram: Boolean(env.TELEGRAM_BOT_TOKEN),
       slack: Boolean(env.SLACK_BOT_TOKEN && env.SLACK_APP_TOKEN),

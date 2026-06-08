@@ -56,33 +56,44 @@ export async function handleMessage(
     // Synthetic = a canned error/fallback string, not real model output. Kept
     // out of history so the model never parrots our own outage messages.
     let synthetic = false;
-    if (provider.name === 'claude') {
-      // Two Claude runtimes share one failover path. Container mode runs the
-      // agent unrestricted inside an isolated box over HTTP (Claude-only —
-      // Gemini has no container service); in-process runs the SDK here. Both
-      // return friendly text for soft errors and throw ClaudeHardError for
-      // quota/auth, so the same catch can fail over to Gemini. (Google writes
-      // still gate on the host either way — they escape the box.)
-      const runClaude =
-        config.runtime === 'container'
-          ? () => runContainerTurn(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS)
-          : () => runClaudeSdk(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS);
+    if (config.runtime === 'container') {
+      // Container mode runs the agent unrestricted inside an isolated box over
+      // HTTP — for EITHER provider (the box picks Claude vs Gemini from
+      // AGENT_PROVIDER; each reaches its API only through the host proxy).
+      // runContainerTurn returns real text, throws ClaudeHardError for
+      // quota/auth and ClaudeSoftError for recoverable failures. Only Claude
+      // fails over to in-process Gemini — for a Gemini box, Gemini IS the
+      // provider, so a hard error just surfaces.
       try {
-        response = await runClaude();
+        response = await runContainerTurn(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS);
+      } catch (err) {
+        if (err instanceof ClaudeHardError && provider.name === 'claude' && PROVIDERS.gemini.isAuthed()) {
+          log.warn('claude container hard error — failing over to in-process gemini', {
+            thread: threadId,
+            kind: err.kind,
+          });
+          const r = await runGemini(db, threadId, userText, context);
+          response = r.text;
+          synthetic = r.synthetic;
+        } else if (err instanceof ClaudeHardError || err instanceof ClaudeSoftError) {
+          response = err.friendly;
+          synthetic = true;
+        } else {
+          throw err;
+        }
+      }
+    } else if (provider.name === 'claude') {
+      // In-process Claude SDK. Hard quota/auth errors fail over to Gemini; soft
+      // errors surface as friendly (synthetic) text.
+      try {
+        response = await runClaudeSdk(db, threadId, `${context}\n\n${userText}`, AGENT_TIMEOUT_MS);
       } catch (err) {
         if (err instanceof ClaudeHardError && PROVIDERS.gemini.isAuthed()) {
-          // Claude is out of quota or auth-broken; fall back to Gemini for
-          // this turn so the user still gets an answer.
           log.warn('claude hard error — failing over to gemini', { thread: threadId, kind: err.kind });
           const r = await runGemini(db, threadId, userText, context);
           response = r.text;
           synthetic = r.synthetic;
-        } else if (err instanceof ClaudeHardError) {
-          response = err.friendly;
-          synthetic = true;
-        } else if (err instanceof ClaudeSoftError) {
-          // Recoverable error that survived retries — send the friendly note but
-          // keep it out of history so the model doesn't parrot the outage later.
+        } else if (err instanceof ClaudeHardError || err instanceof ClaudeSoftError) {
           response = err.friendly;
           synthetic = true;
         } else {
