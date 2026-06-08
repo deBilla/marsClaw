@@ -14,10 +14,27 @@ import { loadHistory } from '../db/messages.ts';
 import { loadConfig } from '../lib/config.ts';
 import { log } from '../lib/log.ts';
 import { ensureContainerUp, recordActivity } from './container-runtime.ts';
-import { ClaudeHardError, classifyHardError, userFriendlyError } from './claude-error.ts';
+import {
+  ClaudeHardError,
+  ClaudeSoftError,
+  classifyHardError,
+  isTransientError,
+  suggestedRetryDelayMs,
+  userFriendlyError,
+} from './claude-error.ts';
 
 const PROVIDER_NAME = 'claude';
 const SEED_TURNS = 20;
+
+// Transient upstream failures (Anthropic 429 rate limits, 5xx, brief network
+// blips) surface either as a thrown turn error or as "API Error: …" result
+// text. The container has no retry of its own, so a single 429 used to come
+// straight back as "I'm being rate-limited" — and worse, that string got
+// written to history and parroted on later turns. Retry with backoff inside the
+// turn's time budget, mirroring the Gemini path.
+const RETRY_BASE_MS = 3_000;
+const RETRY_MAX_MS = 30_000;
+const MAX_RETRIES = 4;
 
 // The Claude CLI sometimes surfaces an upstream API failure (rate limit, quota,
 // auth) as the assistant RESULT TEXT rather than a thrown error — it begins
@@ -28,16 +45,20 @@ function looksLikeApiError(text: string): boolean {
 }
 
 // Apply the same error contract as runClaudeSdk: throw ClaudeHardError for
-// quota/auth (so handleMessage can fail over to Gemini), otherwise return
-// friendly text. `raw` is the error string (from a thrown turn or an API-error
-// result). Returns friendly text, or throws ClaudeHardError.
-function interpretError(raw: string): string {
+// quota/auth (so handleMessage can fail over to Gemini), otherwise throw
+// ClaudeSoftError carrying friendly text (sent to the user but kept out of
+// history). `raw` is the error string (from a thrown turn or an API-error
+// result). Never returns — always throws.
+function interpretError(raw: string): never {
   const kind = classifyHardError(raw);
   const friendly = userFriendlyError(raw);
   if (kind !== 'other') {
     throw new ClaudeHardError(kind, friendly ?? 'My API auth/quota failed.', raw);
   }
-  return friendly ?? `Sorry — my agent runtime hit an error on that one. Try again in a moment.`;
+  throw new ClaudeSoftError(
+    friendly ?? `Sorry — my agent runtime hit an error on that one. Try again in a moment.`,
+    raw,
+  );
 }
 
 // The container resumes from its OWN ~/.claude transcript store. A session id
@@ -91,25 +112,51 @@ export async function runContainerTurn(
 
   const resumeId = getThreadSession(db, threadId, PROVIDER_NAME);
   // No prior container session → seed history into the message (one-time cost).
-  const text = resumeId ? userText : prependHistory(db, threadId, userText);
+  let postText = resumeId ? userText : prependHistory(db, threadId, userText);
+  let postResume = resumeId;
+  const deadline = Date.now() + timeoutMs; // overall budget incl. retries
 
-  let data = await postTurn(base, threadId, text, timeoutMs, resumeId);
+  let data = await postTurn(base, threadId, postText, timeoutMs, postResume);
 
   // Stale resume id (e.g. a session from a prior in-process run, or purged on
   // the container side) → clear it and retry once as a fresh session, seeding
   // history into the message so context isn't lost.
-  if (data.error && resumeId && STALE_SESSION_RE.test(data.error)) {
+  if (data.error && postResume && STALE_SESSION_RE.test(data.error)) {
     log.info('container stale session — clearing and retrying fresh', { thread: threadId });
     clearThreadSession(db, threadId);
-    const seeded = prependHistory(db, threadId, userText);
-    data = await postTurn(base, threadId, seeded, timeoutMs, null);
+    postText = prependHistory(db, threadId, userText);
+    postResume = null;
+    data = await postTurn(base, threadId, postText, timeoutMs, postResume);
   }
 
-  // Thrown/HTTP error from the turn → friendly text, or ClaudeHardError (→ the
-  // caller fails over to Gemini) for quota/auth.
+  // Retry transient upstream failures (rate limit / 5xx / network) with backoff.
+  // The error may arrive as a thrown turn error OR as "API Error: …" result text.
+  let backoff = RETRY_BASE_MS;
+  for (let attempt = 1; ; attempt++) {
+    const rawErr = data.error ?? (looksLikeApiError(data.reply ?? '') ? (data.reply ?? '') : null);
+    if (!rawErr) break; // success — no error in either channel
+    if (!isTransientError(rawErr) || attempt > MAX_RETRIES) break; // give up → interpret below
+    const wait =
+      Math.min(suggestedRetryDelayMs(rawErr) ?? backoff, RETRY_MAX_MS) +
+      Math.floor(Math.random() * 500);
+    if (Date.now() + wait >= deadline) break; // no time budget left
+    log.warn('container turn transient error — backing off', {
+      thread: threadId,
+      attempt,
+      wait_ms: wait,
+      preview: rawErr.slice(0, 120),
+    });
+    await new Promise((r) => setTimeout(r, wait));
+    backoff = Math.min(backoff * 2, RETRY_MAX_MS);
+    recordActivity(); // keep the container warm across the wait
+    data = await postTurn(base, threadId, postText, timeoutMs, postResume);
+  }
+
+  // Thrown/HTTP error from the turn → ClaudeSoftError (synthetic, not persisted)
+  // or ClaudeHardError (→ the caller fails over to Gemini) for quota/auth.
   if (data.error) {
     log.error('container turn error', { thread: threadId, err: data.error });
-    return interpretError(data.error);
+    interpretError(data.error);
   }
 
   const reply = data.reply ?? '';
@@ -117,7 +164,7 @@ export async function runContainerTurn(
   // 429). Translate it instead of relaying the raw "API Error: …" to the user.
   if (looksLikeApiError(reply)) {
     log.warn('container turn returned API-error result text', { thread: threadId, preview: reply.slice(0, 120) });
-    return interpretError(reply);
+    interpretError(reply);
   }
 
   if (data.sessionId) setThreadSession(db, threadId, PROVIDER_NAME, data.sessionId);

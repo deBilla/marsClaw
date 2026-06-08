@@ -19,6 +19,34 @@ export class ClaudeHardError extends Error {
   }
 }
 
+/** Thrown for a soft/recoverable error after retries are exhausted (e.g. a
+ *  persistent rate limit). `friendly` is sent to the user but, unlike a real
+ *  reply, must NOT be written to history — otherwise the model reads its own
+ *  "I'm being rate-limited" line next turn and parrots the outage. */
+export class ClaudeSoftError extends Error {
+  constructor(public readonly friendly: string, message: string) {
+    super(message);
+    this.name = 'ClaudeSoftError';
+  }
+}
+
+/** Parse a server-suggested retry delay (ms) from an error string: a
+ *  `retry-after: 30` header echo, or prose like "try again in 12s" / "retry in
+ *  500ms". Returns undefined when none is advertised. */
+export function suggestedRetryDelayMs(msg: string): number | undefined {
+  const header = msg.match(/retry-after"?\s*[:=]\s*"?([0-9.]+)/i);
+  if (header) {
+    const n = parseFloat(header[1]);
+    if (!Number.isNaN(n)) return n * 1000; // header is seconds
+  }
+  const prose = msg.match(/(?:try again|retry)\s+(?:in|after)\s+([0-9.]+)\s*(ms|s)\b/i);
+  if (prose) {
+    const n = parseFloat(prose[1]);
+    if (!Number.isNaN(n)) return prose[2].toLowerCase() === 'ms' ? n : n * 1000;
+  }
+  return undefined;
+}
+
 export function userFriendlyError(msg: string): string | null {
   if (/QUOTA_EXHAUSTED|exhausted your capacity|quota will reset/i.test(msg)) {
     return `I've hit my daily API quota. Try again later or switch providers.`;

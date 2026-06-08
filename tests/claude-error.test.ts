@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'bun:test';
-import { isTransientError, userFriendlyError } from '../src/providers/claude-error.ts';
+import {
+  isTransientError,
+  suggestedRetryDelayMs,
+  userFriendlyError,
+} from '../src/providers/claude-error.ts';
+
+// The real Anthropic 429 the container hands back as result text.
+const ACCOUNT_429 =
+  'API Error: Request rejected (429) · This request would exceed your account\'s rate limit. Please try again later.';
 
 describe('userFriendlyError', () => {
   it('maps quota errors', () => {
@@ -44,5 +52,27 @@ describe('isTransientError', () => {
 
   it('returns false for non-matching errors', () => {
     expect(isTransientError('some random error')).toBe(false);
+  });
+
+  it('treats the real account 429 as transient (so it gets retried)', () => {
+    expect(isTransientError(ACCOUNT_429)).toBe(true);
+  });
+});
+
+describe('suggestedRetryDelayMs', () => {
+  it('parses a retry-after header echo (seconds)', () => {
+    expect(suggestedRetryDelayMs('retry-after: 30')).toBe(30_000);
+    expect(suggestedRetryDelayMs('Retry-After=5')).toBe(5_000);
+  });
+
+  it('parses prose delays in s and ms', () => {
+    expect(suggestedRetryDelayMs('please try again in 12s')).toBe(12_000);
+    expect(suggestedRetryDelayMs('retry after 1.5s')).toBe(1_500);
+    expect(suggestedRetryDelayMs('retry in 500ms')).toBe(500);
+  });
+
+  it('returns undefined when no delay is advertised', () => {
+    expect(suggestedRetryDelayMs(ACCOUNT_429)).toBeUndefined();
+    expect(suggestedRetryDelayMs('rate-limit exceeded')).toBeUndefined();
   });
 });

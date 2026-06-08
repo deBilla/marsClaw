@@ -4,7 +4,7 @@ import type { Channel } from './channels/types.ts';
 import { PROVIDERS, pickProvider } from './providers/registry.ts';
 import { runClaudeSdk } from './providers/claude-sdk.ts';
 import { runContainerTurn } from './providers/container-client.ts';
-import { ClaudeHardError } from './providers/claude-error.ts';
+import { ClaudeHardError, ClaudeSoftError } from './providers/claude-error.ts';
 import { startTypingRefresh, stopTypingRefresh, pauseTypingAfterDelivery } from './lib/typing.ts';
 import { log } from './lib/log.ts';
 import { loadConfig } from './lib/config.ts';
@@ -78,6 +78,11 @@ export async function handleMessage(
           response = r.text;
           synthetic = r.synthetic;
         } else if (err instanceof ClaudeHardError) {
+          response = err.friendly;
+          synthetic = true;
+        } else if (err instanceof ClaudeSoftError) {
+          // Recoverable error that survived retries — send the friendly note but
+          // keep it out of history so the model doesn't parrot the outage later.
           response = err.friendly;
           synthetic = true;
         } else {
