@@ -61,8 +61,11 @@ cp "$SWIFT_BIN" "$APP/Contents/MacOS/marsClaw"
 cp "$INFO_PLIST" "$APP/Contents/Info.plist"
 # Embed each per-arch engine dir (binary + assets) under Resources/engine/<arch>.
 # Copy arch dirs explicitly so stray files at dist/engine root never leak in.
+# Use ditto, not `cp -R`: the Bun-compiled binary carries a system
+# `com.apple.provenance` xattr that `cp` can't copy, making it exit non-zero and
+# trip `set -e` mid-copy. ditto is Apple's bundle-aware copy and handles it.
 for a in arm64 x64; do
-  [ -d "$DIST/engine/$a" ] && cp -R "$DIST/engine/$a" "$APP/Contents/Resources/engine/$a"
+  [ -d "$DIST/engine/$a" ] && ditto "$DIST/engine/$a" "$APP/Contents/Resources/engine/$a"
 done
 
 # 4) Codesign inside-out (nested executables first, bundle last).
@@ -88,7 +91,7 @@ fi
 bold "5/6  Notarizing app…"
 ZIP="$DIST/marsClaw.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" "${NOTARY_KC_ARGS[@]}" --wait
+xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" ${NOTARY_KC_ARGS[@]+"${NOTARY_KC_ARGS[@]}"} --wait
 xcrun stapler staple "$APP"
 rm -f "$ZIP"
 
@@ -98,10 +101,14 @@ DMG="$DIST/marsClaw.dmg"
 STAGE="$DIST/dmg-stage"
 rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"
-cp -R "$APP" "$STAGE/"
+ditto "$APP" "$STAGE/$(basename "$APP")"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "marsClaw" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" "${NOTARY_KC_ARGS[@]}" --wait
+# Code-sign the disk image itself (not just the app inside) so Gatekeeper's
+# `spctl --assess --type open` accepts it as a Notarized Developer ID image
+# rather than reporting "no usable signature". Must happen before notarizing.
+codesign --force --timestamp --sign "$SIGN_ID" "$DMG"
+xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" ${NOTARY_KC_ARGS[@]+"${NOTARY_KC_ARGS[@]}"} --wait
 xcrun stapler staple "$DMG"
 rm -rf "$STAGE"
 
