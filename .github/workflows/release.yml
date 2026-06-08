@@ -1,0 +1,91 @@
+name: Release (macOS DMG)
+
+# Build, Developer-ID sign, notarize, and attach a stapled DMG to a GitHub
+# Release whenever a v* tag is pushed (e.g. `git tag v0.1.0 && git push --tags`).
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   MACOS_CERTIFICATE_P12      base64 of the exported "Developer ID Application"
+#                              cert+key .p12  (base64 -i cert.p12 | pbcopy)
+#   MACOS_CERTIFICATE_PASSWORD password used when exporting that .p12
+#   MACOS_SIGN_ID              e.g. "Developer ID Application: Your Name (TEAMID)"
+#   KEYCHAIN_PASSWORD          any throwaway string for the temp CI keychain
+#   AC_API_KEY_P8              base64 of an App Store Connect API key .p8
+#   AC_API_KEY_ID              the key's Key ID
+#   AC_API_ISSUER_ID           the API key's Issuer ID
+#
+# The App Store Connect API key (Users and Access → Integrations → App Store
+# Connect API) is preferred over an Apple-ID password for unattended CI.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the Release and upload the DMG
+
+jobs:
+  release:
+    runs-on: macos-14 # Apple Silicon; builds a universal app (arm64 + x86_64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Import Developer ID certificate into a temporary keychain
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"   # no auto-lock during the run
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          # Let codesign use the key without an interactive prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Put our keychain first in the search list so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Store notarization credentials (App Store Connect API key)
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          echo "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac_api_key.p8"
+          xcrun notarytool store-credentials marsclaw-notary \
+            --key "$RUNNER_TEMP/ac_api_key.p8" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --keychain "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/ac_api_key.p8"
+
+      - name: Build, sign, notarize, and package the DMG
+        env:
+          SIGN_ID: ${{ secrets.MACOS_SIGN_ID }}
+          NOTARY_PROFILE: marsclaw-notary
+          # Pin notarytool to the temp keychain that holds the stored profile.
+          NOTARY_KEYCHAIN: ${{ runner.temp }}/build.keychain-db
+        run: ./scripts/package-mac.sh
+
+      - name: Attach DMG to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/marsClaw.dmg
+          fail_on_unmatched_files: true
+          generate_release_notes: true

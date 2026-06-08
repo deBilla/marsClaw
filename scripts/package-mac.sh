@@ -36,6 +36,12 @@ fi
 
 bold() { printf "\033[1m%s\033[0m\n" "$1"; }
 
+# Optional: pin notarytool to a specific keychain (CI stores the notary profile
+# in a temporary keychain rather than the default login one). Empty = default
+# keychain search list, which is what a normal local build wants.
+NOTARY_KC_ARGS=()
+[ -n "${NOTARY_KEYCHAIN:-}" ] && NOTARY_KC_ARGS=(--keychain "$NOTARY_KEYCHAIN")
+
 # 1) Engine: single binary + assets, both arches (universal app).
 bold "1/6  Building engine (arm64 + x64)…"
 bun run scripts/build-engine.ts --all
@@ -82,7 +88,7 @@ fi
 bold "5/6  Notarizing app…"
 ZIP="$DIST/marsClaw.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" "${NOTARY_KC_ARGS[@]}" --wait
 xcrun stapler staple "$APP"
 rm -f "$ZIP"
 
@@ -95,7 +101,7 @@ mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "marsClaw" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" "${NOTARY_KC_ARGS[@]}" --wait
 xcrun stapler staple "$DMG"
 rm -rf "$STAGE"
 

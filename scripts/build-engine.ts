@@ -19,7 +19,7 @@
 // only from its embedded fs, never from disk). The plugin maps the specifier to
 // the real wasm file so it embeds inline and Gemini works in the single binary.
 
-import { cpSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
@@ -39,6 +39,9 @@ const wasmBinaryPlugin: Bun.BunPlugin = {
 // assets — tools/ voice + sidecars, container/ — are added with W4 once the
 // sidecars move to compiled-in `_sidecar` subcommands, since their source can't
 // run standalone from here.)
+// `wiki/` is gitignored (seeded per-user by bootstrap.ts), so it's absent on a
+// clean clone / CI checkout — its entry here is optional and skipped if missing.
+// The rest are committed and must exist.
 const ASSET_PATHS = ['CLAUDE.md', 'GEMINI.md', 'MEMORY.template.md', '.env.example', 'migrations', 'skills', 'wiki'];
 
 type Arch = 'arm64' | 'x64';
@@ -62,7 +65,14 @@ for (const arch of archs) {
 
   const assets = resolve(out, 'assets');
   mkdirSync(assets, { recursive: true });
-  for (const p of ASSET_PATHS) cpSync(resolve(ROOT, p), resolve(assets, p), { recursive: true });
+  for (const p of ASSET_PATHS) {
+    const src = resolve(ROOT, p);
+    if (!existsSync(src)) {
+      console.warn(`  (skipping optional asset not present: ${p})`);
+      continue;
+    }
+    cpSync(src, resolve(assets, p), { recursive: true });
+  }
 
   console.log(`✓ ${arch} → ${resolve(out, 'marsclaw')} (+ assets/)`);
 }
