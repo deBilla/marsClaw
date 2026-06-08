@@ -28,11 +28,13 @@ const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface SetTyping {
   setTyping?(threadId: string): Promise<void>;
+  clearTyping?(threadId: string): Promise<void>;
 }
 
 interface Target {
   threadId: string;
   setTyping: (id: string) => Promise<void>;
+  clearTyping?: (id: string) => Promise<void>;
   timer: ReturnType<typeof setInterval>;
   startedAt: number;
   pausedUntil: number; // epoch ms; 0 = not paused
@@ -86,6 +88,7 @@ export function startTypingRefresh(threadId: string, router: SetTyping): void {
   active.set(threadId, {
     threadId,
     setTyping,
+    clearTyping: router.clearTyping?.bind(router),
     timer,
     startedAt,
     pausedUntil: 0,
@@ -97,6 +100,9 @@ export function stopTypingRefresh(threadId: string): void {
   if (!t) return;
   clearInterval(t.timer);
   active.delete(threadId);
+  // Let the channel tear down any non-self-expiring indicator (e.g. Slack's
+  // reaction). Best-effort and fire-and-forget — failures are non-fatal.
+  if (t.clearTyping) void t.clearTyping(threadId).catch((err) => log.debug('clearTyping failed', { err }));
 }
 
 /**

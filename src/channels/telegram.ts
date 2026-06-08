@@ -139,6 +139,20 @@ export function createTelegramChannel(opts: TelegramOptions): Channel {
         await bot.sendMessage(chatId, part);
       }
     },
+
+    async setTyping(threadId: string) {
+      if (!threadId.startsWith(PREFIX)) return;
+      const chatId = threadId.slice(PREFIX.length);
+      try {
+        // Telegram shows the "typing…" status for ~5s; the typing refresher
+        // re-fires every 4s to keep it alive until the reply lands.
+        await bot.sendChatAction(chatId, 'typing');
+      } catch (err) {
+        // Typing is a UX nicety, not a correctness signal — swallow transient
+        // failures the same way WhatsApp's presence update does.
+        log.debug('telegram setTyping failed', { chatId, err });
+      }
+    },
   };
 }
 

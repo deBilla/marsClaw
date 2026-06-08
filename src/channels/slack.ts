@@ -143,10 +143,20 @@ export async function createSlackChannel(opts: SlackOptions): Promise<Channel> {
     }
   }
 
+  // Slack has no bot "typing…" API for channels/DMs, so we approximate it with a
+  // reaction on the user's last message: add it while the agent works, remove it
+  // when the reply lands. `lastTs` remembers the message to react to per channel;
+  // `reactedTs` remembers what we currently have a reaction on (so add/remove are
+  // idempotent and we remove the right ts even if a newer message arrived).
+  const TYPING_EMOJI = process.env.MARSCLAW_SLACK_TYPING_EMOJI ?? 'hourglass_flowing_sand';
+  const lastTs = new Map<string, string>();
+  const reactedTs = new Map<string, string>();
+
   app.message(async ({ message }) => {
     const m = message as {
       subtype?: string;
       text?: string;
+      ts?: string;
       channel?: string;
       user?: string;
       bot_id?: string;
@@ -184,6 +194,7 @@ export async function createSlackChannel(opts: SlackOptions): Promise<Channel> {
     if (!fullText) return; // empty event with nothing usable
 
     const threadId = `${PREFIX}${m.channel}`;
+    if (m.ts) lastTs.set(m.channel, m.ts);
     log.info('slack in', { channel: m.channel, preview: fullText.slice(0, 80) });
     try {
       await opts.onMessage(threadId, fullText);
@@ -193,11 +204,12 @@ export async function createSlackChannel(opts: SlackOptions): Promise<Channel> {
   });
 
   app.event('app_mention', async ({ event }) => {
-    const e = event as { text?: string; channel?: string; user?: string };
+    const e = event as { text?: string; ts?: string; channel?: string; user?: string };
     if (!e.text || !e.channel) return;
     if (!senderAllowed(e.user)) return;
     if (!rateOk(e.user ?? e.channel)) return;
     const threadId = `${PREFIX}${e.channel}`;
+    if (e.ts) lastTs.set(e.channel, e.ts);
     try {
       await opts.onMessage(threadId, e.text);
     } catch (err) {
@@ -221,6 +233,38 @@ export async function createSlackChannel(opts: SlackOptions): Promise<Channel> {
       }
       const channel = threadId.slice(PREFIX.length);
       await app.client.chat.postMessage({ channel, text });
+    },
+
+    // Slack's stand-in for a typing bubble: react to the user's last message
+    // while the agent works. Idempotent — adding again while already reacted is
+    // a no-op, so the 4s refresh tick doesn't spam reactions.add.
+    async setTyping(threadId: string) {
+      if (!threadId.startsWith(PREFIX)) return;
+      const channel = threadId.slice(PREFIX.length);
+      const ts = lastTs.get(channel);
+      if (!ts || reactedTs.get(channel) === ts) return;
+      try {
+        await app.client.reactions.add({ channel, timestamp: ts, name: TYPING_EMOJI });
+        reactedTs.set(channel, ts);
+      } catch (err) {
+        // Needs the `reactions:write` scope; also "already_reacted" can race.
+        // Either way typing is a UX nicety — log and move on.
+        log.debug('slack setTyping (reaction add) failed', { channel, err });
+        reactedTs.set(channel, ts); // avoid retrying a doomed add every tick
+      }
+    },
+
+    async clearTyping(threadId: string) {
+      if (!threadId.startsWith(PREFIX)) return;
+      const channel = threadId.slice(PREFIX.length);
+      const ts = reactedTs.get(channel);
+      if (!ts) return;
+      reactedTs.delete(channel);
+      try {
+        await app.client.reactions.remove({ channel, timestamp: ts, name: TYPING_EMOJI });
+      } catch (err) {
+        log.debug('slack clearTyping (reaction remove) failed', { channel, err });
+      }
     },
   };
 }

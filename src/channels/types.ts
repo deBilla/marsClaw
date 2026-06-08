@@ -17,6 +17,11 @@ export interface Channel {
    *  no-op; expirations vary (Telegram ~5s, WhatsApp ~10s) so callers
    *  generally re-fire on a short interval while work is in progress. */
   setTyping?(threadId: string): Promise<void>;
+  /** Tear down whatever `setTyping` put up, once work is done. Native typing
+   *  bubbles (Telegram/WhatsApp) self-expire, so they don't need this; Slack
+   *  has no typing API and instead reacts to the user's message, so it must
+   *  remove that reaction here. Called once when the refresh stops. */
+  clearTyping?(threadId: string): Promise<void>;
 }
 
 export interface ChannelInit {
