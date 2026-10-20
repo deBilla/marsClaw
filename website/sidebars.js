@@ -10,13 +10,13 @@ const sidebars = {
       type: 'category',
       label: 'Understand',
       collapsed: false,
-      items: ['architecture', 'vs-nanoclaw'],
+      items: ['architecture', 'security', 'container-runtime', 'vs-nanoclaw'],
     },
     {
       type: 'category',
       label: 'Configure',
       collapsed: false,
-      items: ['configuration', 'channels', 'providers', 'voice', 'google'],
+      items: ['configuration', 'channels', 'providers', 'voice', 'youtube', 'google'],
     },
     {
       type: 'category',

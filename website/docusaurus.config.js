@@ -14,8 +14,14 @@ const config = {
   projectName: 'marsClaw',
   trailingSlash: false,
 
-  onBrokenLinks: 'warn',
-  onBrokenMarkdownLinks: 'warn',
+  // Fail the build (and the PR check) on broken links. Markdown links that
+  // point outside docs/ (e.g. ../src/…) only warn, since they resolve on GitHub.
+  onBrokenLinks: 'throw',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
+  },
 
   i18n: {
     defaultLocale: 'en',

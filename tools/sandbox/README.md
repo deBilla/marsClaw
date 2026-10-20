@@ -1,5 +1,7 @@
 # Kernel sandbox stubs
 
+> **Superseded / being retired.** The [container runtime](../../docs/container-runtime.md) (`runtime: container`) now provides real isolation and is mutually exclusive with these wrappers. Nothing in the default install uses this directory; it's reachable only via `bun run service install --hardened`. Kept for reference.
+
 The in-process gates in [src/lib/tool-permissions.ts](../../src/lib/tool-permissions.ts) and friends are best-effort: a bug in the gate, a deserialization issue inside the SDK, or a compromised dependency can step around them. The files in this directory move the most important defenses *into the kernel*, where a buggy or hijacked agent process **cannot** read `.env`, `~/.claude.json`, or `data/secrets/` regardless of what the gate says.
 
 This is a stub. Read the source comments before deploying — there are deliberate gaps (no seccomp profile yet, MCP credential split not done, network egress still open).

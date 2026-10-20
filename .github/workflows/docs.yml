@@ -9,6 +9,15 @@ on:
       - 'README.md'
       - '.github/workflows/docs.yml'
 
+  # Build-only on PRs so a broken docs build is caught before merge. The
+  # deploy job below is skipped for pull_request events.
+  pull_request:
+    paths:
+      - 'website/**'
+      - 'docs/**'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
+
   workflow_dispatch:
 
 # Modern GitHub Pages deploy — no gh-pages branch needed. The Pages source
@@ -19,9 +28,11 @@ permissions:
   pages: write
   id-token: write
 
+# Deploys share one queue and never cancel each other; PR builds get their
+# own per-PR group and a newer push to the same PR cancels the stale build.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -43,6 +54,7 @@ jobs:
         run: cd website && npm run build
 
       - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: website/build
@@ -50,6 +62,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
