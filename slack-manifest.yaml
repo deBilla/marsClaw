@@ -33,6 +33,7 @@ oauth_config:
   scopes:
     bot:
       - chat:write          # send replies
+      - files:read          # download files users share (inbound attachments)
       - files:write         # send_file / voice notes
       - im:history          # receive DM messages (required for message.im)
       - im:read             # list/open DM conversations

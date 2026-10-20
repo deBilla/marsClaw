@@ -10,7 +10,7 @@ Both projects build personal-chat agents on top of large language models. They m
 
 | | marsClaw | NanoClaw |
 |---|---|---|
-| Code size | ~7k lines of TS (`src/`) | dramatically larger (host + container-runner + skills + tests) |
+| Code size | ~11k lines of TS (~10.7k in `src/`) | dramatically larger (host + container-runner + skills + tests) |
 | Target user | one person on their laptop | one host serving many people, multi-tenant |
 | Isolation | default: in-process as host user (capability-removal + `allowed_paths`); optional: **one shared isolated container** for the single owner | per-session Docker / Apple Container, one per tenant |
 | Agent runtime | Claude Agent SDK **or** Gemini CLI core, in-process; one long-lived session per thread — optionally inside a shared container | Claude Agent SDK in-container; OpenCode via providers branch |
@@ -61,14 +61,14 @@ Conceptually identical architecture: local sidecars for Whisper and Kokoro.
 
 | | Pros | Cons |
 |---|---|---|
-| **marsClaw** | Python venv, no Docker; one `bun run voice install`; faster-whisper for STT and kokoro-onnx for TTS, both fully local | Two Python services to babysit; ffmpeg + Python 3.10+ prereqs; ~650MB models on disk |
+| **marsClaw** | Python venv, no Docker; one `bun run voice install` (self-installs Python 3.11/3.12 + ffmpeg on macOS); works on WhatsApp and Telegram; faster-whisper for STT and kokoro-onnx for TTS, both fully local | Two Python services to babysit; ffmpeg + Python 3.11/3.12 prereqs; ~650MB models on disk |
 | **NanoClaw (nanoclaw-voice)** | `docker compose up -d` and you're done; sidecars auto-restart with the rest of the stack | Requires Docker; first-time image pull is slow; can't run in environments where Docker is blocked |
 
 ## Tools available to the agent
 
 | | Pros | Cons |
 |---|---|---|
-| **marsClaw** | Whatever the chosen SDK ships (read, write, edit, glob, grep — shell and web are off by default, see [security.md](security.md)) **plus** our own MCP suite: `send_message`, `send_file`, `speak`, and a full Google Workspace set — Gmail (search/read/send), Calendar, Drive, Docs, Sheets (read/write), Slides, Contacts, with multi-account support. A `researcher` subagent (`tools:['WebFetch']`, empty-room context) handles web reads when enabled. | Bound by what the Claude Agent SDK / Gemini core expose for the core loop; no scheduling, no built-in image gen / LaTeX |
+| **marsClaw** | Whatever the chosen SDK ships (read, write, edit, glob, grep — shell and web are off by default, see [security.md](security.md)) **plus** our own MCP suite: `send_message`, `send_file`, `speak`, and a full Google Workspace set — Gmail (search/read/send), Calendar, Drive, Docs, Sheets (read/write), Slides, Contacts, with multi-account support. A `researcher` subagent (`tools:['WebFetch']`, empty-room context) is the persona-mandated path for web reads when enabled (instruction-level; the allow-list is the enforced boundary). Optional per-call approval for Google writes. | Bound by what the Claude Agent SDK / Gemini core expose for the core loop; no scheduling, no built-in image gen / LaTeX |
 | **NanoClaw** | Rich custom MCP suite: `send_message`, `send_file`, `edit_message`, `schedule_task`, `ask_user_question`, `install_packages`, `add_mcp_server`, sub-`agents` spawn, `voice`, `latex`, `imagegen`, `interactive` | More to maintain; tool bugs are yours to fix; each tool's deps go into the container image |
 
 ## Memory & skills
@@ -96,7 +96,7 @@ Conceptually identical architecture: local sidecars for Whisper and Kokoro.
 
 | | Pros | Cons |
 |---|---|---|
-| **marsClaw** | Structured `pino` logging with rotation (`log-rotate`); `bun run status` for db summary; `bun run usage` for Anthropic spend (today / week / by-thread); per-thread heartbeat (drives the live "typing…" indicator and stuck-turn detection); a health server; `bun run service logs` | Sidecar (voice) logs are separate; with no service installed, logs follow your terminal unless you redirect |
+| **marsClaw** | Structured logging with in-process rotation (`log-rotate`) and crash dumps; `bun run status` for db summary; `bun run usage` for Anthropic spend (today / week / by-thread); per-thread heartbeat (drives the live "typing…" indicator and stuck-turn detection); an opt-in localhost health endpoint; `bun run service logs`; chat alerts on bursts of tool denials | Sidecar (voice) logs are separate; with no service installed, logs follow your terminal unless you redirect |
 | **NanoClaw** | Structured logs: `nanoclaw.log`, `nanoclaw.error.log`, `setup-steps/*.log`; session DBs as inspectable forensic artifacts; container heartbeat, pending_questions, processing_ack tables | Container logs are ephemeral (`--rm` flag) — silent failures inside the container leave nothing behind; correlating an issue across host + container is multi-step |
 
 ## Performance

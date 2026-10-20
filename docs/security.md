@@ -44,7 +44,7 @@ If any of these are your real threat in the default in-process runtime, you want
 ```
 
 - The MCP server is a separate process from the agent.
-- The MCP child env passthrough in [src/providers/claude-sdk.ts](https://github.com/deBilla/marsclaw/blob/main/src/providers/claude-sdk.ts) explicitly **withholds `ANTHROPIC_API_KEY`** from the broker — even the broker only sees what it needs.
+- The MCP child env passthrough in [src/providers/claude-sdk.ts](https://github.com/deBilla/marsclaw/blob/main/src/providers/claude-sdk.ts) is an allow-list (`PATH`, `HOME`, locale, `MARSCLAW_DB`/`CONFIG`/`VOICE_OUT`/`HEARTBEAT`, the Google OAuth client id/secret, `KOKORO_*`, plus `GOOGLE_APPLICATION_CREDENTIALS` and `BQ_*` for the external `data-platform` server). It **withholds `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the channel tokens** — even the broker only sees what it needs.
 - Google refresh tokens live in the macOS Keychain (service `marsclaw`) or `data/secrets/*.txt` (0600) on Linux; both are blocked from the agent's file tools by the sensitive-path guard.
 
 This is enforced by **process boundaries + policy**, not by the kernel. It's strong against the prompt-injection threat (the agent can only act through the broker's validated API). It does not stop host-level compromise.
@@ -121,12 +121,17 @@ When `allow_web` is on, the executive **delegates page reads to a `researcher` s
 - `tools: ['WebFetch']` — no FS, no MCP, no conversation history.
 - Its system prompt instructs it that fetched pages are untrusted and to return a brief answer (not raw page text).
 - The executive's persona is updated to treat the researcher's output as quotable reference material, never as instructions.
+- **The delegation is instruction-level, not enforced.** When `allow_web` is on, the main agent also keeps `WebFetch` in its tool list; the persona says "always delegate", and the URL allow-list applies to both. A hijacked executive could fetch directly — the allow-list is the hard boundary.
 
 This is the "empty room" pattern: even if a fetched page tries to hijack the researcher, there are no credentials or files in its context to steal — and the URL allowlist bounds where it can reach. It does **not** fully solve indirect prompt injection (summary poisoning remains theoretically possible); the real backstop is that the executive itself has no dangerous capability to misuse when its other flags are off.
 
 ## Audit log
 
-Every tool decision — allow, deny, or `blocked` (mutation gate refusal) — is appended as one JSON line to `logs/audit.log` by [src/lib/audit-log.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/audit-log.ts). Override the path with `MARSCLAW_AUDIT_LOG`.
+Every tool decision — allow, deny, or `blocked` (mutation-gate refusal or a call parked awaiting approval) — is appended as one JSON line to `logs/audit.log` by [src/lib/audit-log.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/audit-log.ts). Override the path with `MARSCLAW_AUDIT_LOG`. The LLM proxy and egress gateway write their request decisions to the same file.
+
+Layers you'll see: `canUseTool`, `sensitive-paths`, `shell-disabled`, `web-disabled`, `url-allowlist`, `egress-gateway`, `mutation-gate`.
+
+**Container-mode caveat:** built-in tool decisions are made inside the agent container, whose audit log lives in the container filesystem and is discarded when the container stops (`--rm`). Host-side records (MCP mutation gate, proxy, gateway) still land in the host `logs/audit.log`.
 
 Each record:
 
@@ -159,11 +164,13 @@ grep '"tool":"WebFetch"' logs/audit.log
 
 ## Why the bot can't approve permission changes from chat
 
-Approval-via-chat (the agent sends "tap yes to allow X" and the user replies "yes") sounds convenient and is a **deliberately omitted feature**. The reasoning matters:
+Approval-via-chat **of permission changes** (the agent sends "tap yes to allow X" and the user replies "yes", and a capability flag flips) sounds convenient and is a **deliberately omitted feature**. The reasoning matters:
 
 The thing asking for approval is the *potentially-compromised* agent. A hijacked turn composes a persuasive approval message ("Tap yes to finish your request ✅") next to an attacker-controlled URL. The human is now manually auditing an opaque string for encoded exfiltration — exactly where human judgment is weakest. Approval fatigue compounds it.
 
 Instead, when something is blocked, the audit log records it and the agent tells the user the precise `data/config.json` edit + restart needed. Permission changes flow through the operator on a real keyboard, not through a chat reply. That sacrifices polish for a meaningful security property.
+
+The one chat-native approval that *does* exist — per-call mutation approval, below — is different in kind: it approves a single action, not a permission, and the prompt and code are produced by trusted broker code rather than the agent.
 
 ## Blast-radius containment (the NemoClaw-style layer)
 
@@ -188,7 +195,9 @@ The agent subprocess is launched with a curated env ([claude-sdk.ts](https://git
 
 ### Per-call mutation approval — `mutation_approval: "all"`
 
-Every mutating tool ([mutation-gate.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/mutation-gate.ts)) blocks and the **broker** (not the agent) sends the operator a structured prompt rendered from the tool's real parameters, plus a random nonce ([approval-gate.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/approval-gate.ts)). The operator replies the nonce; it's intercepted in the main-process dispatcher *before* the agent loop, so the agent can neither author the prompt, generate the nonce, nor see the reply. This is the chat-native form of operator approval — it sidesteps the "injected agent composes a persuasive approval message" failure of naive tap-yes-in-chat because the rendering is done by trusted code from structured fields.
+Every mutating tool ([mutation-gate.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/mutation-gate.ts)) blocks and the **broker** (not the agent) sends the operator a structured prompt rendered from the tool's real parameters, plus a random nonce of the form `ok-XXXXXX` ([approval-gate.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/approval-gate.ts)). The operator has **120 seconds** to reply with a message containing the nonce; it's intercepted in the main-process dispatcher *before* per-thread serialization and the agent loop, so the agent can neither author the prompt, generate the nonce, nor see the reply. There is no explicit "deny" reply — anything else (or silence) lets the request expire and the tool returns *Not sent*. This is the chat-native form of operator approval — it sidesteps the "injected agent composes a persuasive approval message" failure of naive tap-yes-in-chat because the rendering is done by trusted code from structured fields.
+
+With `mutation_approval: "all"`, `allow_mutating_tools` is ignored. The container runtime starts its MCP sidecar with `MARSCLAW_MUTATION_APPROVAL=all` unless you override that env var.
 
 ## The honest platform constraint
 
@@ -267,10 +276,11 @@ In rough order of how much they matter:
 1. **Supply chain** — the SDK and every dep run in-process as you. The `bun.lock` file is the only line of defence between an audited dependency closure and a fresh install; the install path (`setup.sh`) is hardened to use `--frozen-lockfile`, a pinned bun version (`BUN_VERSION`), and a SHA-256-verified nvm installer, but a compromise of any leaf in the closure still runs as you.
 2. **`yt-dlp` is a security boundary**, not a trusted dependency. It runs as the bot's user and parses attacker-influenced YouTube payloads (a YouTube link the user forwarded). Setup pins it to a validated version (`YTDLP_PIN` in `src/cli/setup.ts`); bump deliberately.
 3. **Enabling `allow_shell` reopens the file/credential exfil class.** A denylist cannot make shell safe; this is by design. Pair `allow_shell=true` with the `tools/sandbox/` wrapper and the `tools/llm-proxy/` sidecar for a defensible posture.
-4. **Indirect prompt injection in untrusted content** — the researcher subagent and capability-removal mitigate, but a sufficiently clever poisoned summary can still influence the executive's reply. The audit-density alerter (5 denials in 60s → out-of-band ping via WhatsApp/Telegram) provides a fast operator-facing signal when an injection burst is in flight.
+4. **Indirect prompt injection in untrusted content** — the researcher subagent and capability-removal mitigate, but a sufficiently clever poisoned summary can still influence the executive's reply. The audit-density alerter (≥5 deny/blocked decisions in 60s → one out-of-band ping, 5-min cooldown) provides a fast operator-facing signal when an injection burst is in flight. It's only active when an alert thread is known — `MARSCLAW_ALERT_THREAD`, or exactly one allow-listed WhatsApp/Telegram sender.
 5. **Audit log is local-only.** A host-compromised attacker can rewrite it. Ship to a remote sink if you need real tamper-evidence.
 6. **The model provider sees your context.** Inherent.
-7. **No global bypass toggle.** A previous `MARSCLAW_TOOL_PERMISSIONS=bypass` escape hatch was removed — a setting whose only effect is "disable every gate" is a foot-gun (a forgotten debug toggle silently turns the bot into a credential-exfil channel). Setting that env var now logs a warning and is otherwise ignored. To loosen behaviour for a specific case, edit `data/config.json` directly.
+7. **The hard-coded `data-platform` MCP server.** `claude-sdk.ts` registers an external BigQuery MCP server from a fixed path in the author's home directory and passes it `BQ_*` / `GOOGLE_APPLICATION_CREDENTIALS`. It's outside this repo's audit surface; remove it if you fork.
+8. **No global bypass toggle.** A previous `MARSCLAW_TOOL_PERMISSIONS=bypass` escape hatch was removed — a setting whose only effect is "disable every gate" is a foot-gun (a forgotten debug toggle silently turns the bot into a credential-exfil channel). Setting that env var now logs a warning and is otherwise ignored. To loosen behaviour for a specific case, edit `data/config.json` directly.
 
 ## Where the code lives
 

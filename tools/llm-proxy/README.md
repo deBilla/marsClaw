@@ -1,6 +1,8 @@
-# LLM credential-isolation proxy (stub)
+# LLM credential-isolation proxy
 
-Today the agent process holds the real Anthropic credential (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) in its env. A successful prompt injection that gets shell or arbitrary file read can exfiltrate it. The [security doc](../../docs/security.md) acknowledges this as a residual risk; this sidecar closes it.
+By default the in-process agent holds the real Anthropic credential (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) in its env. A successful prompt injection that gets shell or arbitrary file read can exfiltrate it. This sidecar closes that.
+
+**Where it's used today:** the [container runtime](../../docs/container-runtime.md) starts it automatically (bound to `0.0.0.0:8765` so the container can reach it) and gives the container only `LLM_PROXY_SESSION_TOKEN`. In-process use is opt-in: set `MARSCLAW_LLM_PROXY_URL` + `MARSCLAW_LLM_PROXY_TOKEN` and `claude-sdk.ts` strips the real credential from the agent subprocess env. Run it standalone with `bun run llm-proxy`.
 
 ## How it works
 
@@ -9,7 +11,7 @@ agent process                          llm-proxy (this dir)            api.anthr
  ANTHROPIC_BASE_URL=                    127.0.0.1:8765
    http://127.0.0.1:8765                  - verifies session token
  ANTHROPIC_API_KEY=                       - swaps in real cred
-   <session-token>             ─────►    - logs request           ─────►
+   <session-token>             ─────►    - audits request         ─────►
                                          - (hook) PII redact
                                          - (hook) per-day budget
 ```
@@ -52,6 +54,6 @@ Two units instead of one. The proxy is the parent dependency; the agent depends 
 
 - **No PII redaction.** `redact()` is a no-op hook. Plug a regex sweep (emails, phone numbers, refresh-token shapes) before forwarding if your model provider's logs are a concern.
 - **No per-thread budget.** [src/lib/cost-tracker.ts](../../src/lib/cost-tracker.ts) does this in-process today; moving it here means it survives an agent compromise. Read the upstream response's `usage` block and reject 429-shaped responses upstream when over budget.
-- **Buffered body forwarding.** The stub reads the full upstream response into memory before returning. For streaming (SSE), proxy through a `ReadableStream` and tee bytes to the log line.
+- **Request bodies are buffered** (to count bytes and capture a 200-char preview for `logs/audit.log` — note that preview is user prompt text). Responses are streamed through unchanged, so SSE works.
 - **No mTLS / Unix socket option.** Loopback TCP is fine on a single-user host; multi-user boxes should expose this over a Unix socket with `0600` perms instead.
 - **Gemini.** The Gemini CLI uses OAuth-via-browser auth, not a static bearer. Wrapping it requires intercepting the OAuth flow — not done here.

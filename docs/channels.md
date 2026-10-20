@@ -9,6 +9,19 @@ interface Channel {
 }
 ```
 
+| Capability | Telegram | Slack | WhatsApp |
+|---|---|---|---|
+| Text in / out | ✓ (long replies split at 4000 chars) | ✓ | ✓ |
+| Voice notes in (Whisper) | ✓ (voice + audio files) | — | ✓ |
+| Voice replies out (`speak`) | ✓ (`sendVoice`) | text fallback | ✓ (ogg → voice-note bubble) |
+| Images / documents in | — | ✓ (needs `files:read`) | ✓ |
+| `send_file` out | caption text only | caption text only | ✓ (image / video / document) |
+| Typing indicator | — | — | ✓ |
+| `stop` interrupt, slash-command filter | — | — | ✓ |
+| Sender allow-list + rate limit | ✓ | ✓ | ✓ |
+
+Inbound attachments are saved under `data/shared/<channel>-media/` (capped at 25 MB) and handed to the agent as `[user attached an image: @<path>]` / `[user attached a document "<name>": @<path>]` markers. Untrusted filenames are sanitised before they touch disk ([src/lib/attachment-safety.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/attachment-safety.ts)).
+
 Thread IDs are channel-prefixed (`telegram:`, `slack:`, `whatsapp:`); the [ChannelRouter](https://github.com/deBilla/marsclaw/blob/main/src/channels/router.ts) uses the prefix to dispatch outbound sends back to the right adapter.
 
 ## Telegram
@@ -27,7 +40,7 @@ Manual route, if you'd rather skip the wizard:
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF…
 ```
 
-Telegram supports text in/out and the typing indicator. No images, no voice notes on this adapter — Telegram is the boring-and-reliable channel. Adapter: [src/channels/telegram.ts](https://github.com/deBilla/marsclaw/blob/main/src/channels/telegram.ts).
+Telegram supports text in/out and voice: voice notes and audio files are transcribed when voice is enabled (prefixed `[Voice]:`), and `speak` replies go out via `sendVoice`. No images or documents in, no file attachments out (a `send_file` delivers only its caption), and no typing indicator. Adapter: [src/channels/telegram.ts](https://github.com/deBilla/marsclaw/blob/main/src/channels/telegram.ts).
 
 ### Setup is idempotent
 
@@ -51,7 +64,7 @@ Telegram has no phone-based identity, so the only inbound gate is a chat-id allo
   Allowed chat ids (comma-separated): 123456789,987654321
 ```
 
-Empty means accept any sender. Most owners don't know their chat id yet — the bot logs each new sender at info level on first message, so the usual flow is: leave it empty initially, send a message to the bot from your phone, copy the chat id from the logs into `data/config.json`:
+Empty means accept any sender. Most owners don't know their chat id yet — while the list is empty the bot logs a `warn` with each sender's chat id, so the usual flow is: leave it empty initially, send a message to the bot from your phone, copy the chat id from the logs into `data/config.json`:
 
 ```jsonc
 {
@@ -59,24 +72,30 @@ Empty means accept any sender. Most owners don't know their chat id yet — the 
 }
 ```
 
-or shadow it via `MARSCLAW_TELEGRAM_ALLOWED_CHATS=123456789` in `.env`. On boot the log echoes which mode you're in.
+or shadow it via `MARSCLAW_TELEGRAM_ALLOWED_CHATS=123456789` in `.env`. Rejected senders are logged at `warn` with the chat id.
 
 ## Slack
 
 Uses Socket Mode — no public webhook needed.
 
-1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps). Pick "From scratch".
-2. **OAuth & Permissions** → bot token scopes: `chat:write`, `im:history`, `im:read`, `im:write`, `app_mentions:read`, `users:read`. Install to your workspace. Copy `xoxb-…` → `SLACK_BOT_TOKEN`.
-3. **Basic Information** → App-Level Tokens → "Generate Token and Scopes" with scope `connections:write`. Copy `xapp-…` → `SLACK_APP_TOKEN`.
-4. **Socket Mode** → enable.
-5. **Event Subscriptions** → enable, subscribe to bot events: `message.im`, `app_mention`.
+**Recommended:** `bun run setup` (or `bun run slack connect` on an existing install) generates a personalised app manifest named after you, opens the Slack creation page pre-filled, then collects the two tokens and an optional user-id allow-list. `bun run slack status` shows the wiring; `bun run slack disconnect` comments the tokens out of `.env` (kept for re-enabling). Both restart the launchd service if one is installed.
+
+Manual route, using [slack-manifest.yaml](https://github.com/deBilla/marsclaw/blob/main/slack-manifest.yaml):
+
+1. [api.slack.com/apps?new_app=1](https://api.slack.com/apps?new_app=1) → **From a manifest** → paste the file → Create.
+2. Bot scopes (already in the manifest): `chat:write`, `files:read`, `files:write`, `im:history`, `im:read`, `im:write`, `app_mentions:read`, `users:read`. `files:read` is required to download files users share — without it Slack returns an HTML login page and the bot logs a warning.
+3. **Install App** → copy the Bot User OAuth Token (`xoxb-…`) → `SLACK_BOT_TOKEN`.
+4. **Basic Information** → App-Level Tokens → "Generate Token and Scopes" with scope `connections:write` → `xapp-…` → `SLACK_APP_TOKEN`.
+5. Socket Mode and the `message.im` / `app_mention` events are set by the manifest.
 6. Restart the bot. DM the app from Slack.
+
+What the adapter handles: DMs (plain messages and `file_share` uploads — images and documents are downloaded and passed to the agent) and `@mentions` in channels. Outbound is text only — `send_file` and `speak` fall back to their text. The thread id is the Slack channel/DM id (`slack:D…`), while the allow-list holds **user** ids (`U…`).
 
 Adapter: [src/channels/slack.ts](https://github.com/deBilla/marsclaw/blob/main/src/channels/slack.ts). Lazy-loaded — non-Slack users don't pay the `@slack/bolt` import cost.
 
 ## WhatsApp
 
-The richest channel: text, images (vision), voice notes in and out, document attachments. Uses [Baileys](https://github.com/WhiskeySockets/Baileys) — WhatsApp's web-multi-device protocol — so no Business API account needed.
+The richest channel: text, images (vision), voice notes in and out, document attachments both ways, typing indicator, and a `stop` interrupt. Uses [Baileys](https://github.com/WhiskeySockets/Baileys) — WhatsApp's web-multi-device protocol — so no Business API account needed.
 
 ### First-time link
 
@@ -93,18 +112,18 @@ Auth is saved to `data/whatsapp-auth/` (gitignored). Subsequent boots reconnect 
 
 ### Owner pairing
 
-WhatsApp's `@lid` identifiers can differ from the phone-derived `@s.whatsapp.net` JID, so on a fresh link the bot can't tell which incoming JID is "you". Setup writes a one-shot pairing code into `data/config.json`: send the printed code from your phone, the bot captures the real JID into `allowed_jids`, and the code is cleared.
+WhatsApp's `@lid` identifiers can differ from the phone-derived `@s.whatsapp.net` JID, so on a fresh link the bot can't tell which incoming JID is "you". Setup writes a one-shot pairing code into `data/config.json` with a **5-minute expiry** (`whatsapp_pair_expires_at`): send the printed code from your phone, the bot captures the real JID into `allowed_jids`, and the pairing state is cleared. Other messages are ignored while pairing is pending; if the window lapses, re-run setup.
 
 ### Allow-list
 
 Set `allowed_jids` in `data/config.json` (or `MARSCLAW_WHATSAPP_ALLOWED_JIDS=…` in env) to restrict who can talk to the bot. Empty list = allow anyone. On boot the log will say which mode you're in:
 
 ```
-[whatsapp] allow-list active count=2
+WhatsApp allow-list active count=2
 ```
 
 ```
-[whatsapp] allow-list disabled — accepting from any sender
+WhatsApp allow-list disabled — accepting from any sender. Set allowed_jids in data/config.json to restrict.
 ```
 
 ### Useful commands
@@ -112,16 +131,22 @@ Set `allowed_jids` in `data/config.json` (or `MARSCLAW_WHATSAPP_ALLOWED_JIDS=…
 ```bash
 bun run whatsapp status       # link state + cached media count
 bun run whatsapp reset        # wipe auth → forces a new QR
-bun run whatsapp clear-media  # purge data/whatsapp-media/
+bun run whatsapp clear-media  # purge cached media (see note)
 ```
 
-### Images
+> **Known mismatch:** `status` / `clear-media` look in `data/whatsapp-media/` (the old location), but the adapter now saves media to `data/shared/whatsapp-media/`. Until the CLI is updated, run `MARSCLAW_WHATSAPP_MEDIA=data/shared/whatsapp-media bun run whatsapp clear-media`.
 
-Inbound images are downloaded to `data/whatsapp-media/` and passed to the agent as `@<path>` so Claude/Gemini vision can read them. Caption text (if any) accompanies the image.
+### Images & documents
+
+Inbound images and documents are downloaded to `data/shared/whatsapp-media/` (25 MB cap) and passed to the agent as `@<path>` markers so Claude can read them. Caption text (if any) accompanies the attachment. Outbound `send_file` sends images and videos inline and everything else as a document.
+
+### Interrupt and slash commands
+
+A message that is just `stop`, `abort`, `cancel`, `nvm`, `never mind` (trailing punctuation allowed) tears down the in-flight turn immediately instead of queueing behind it, and replies `Stopped.` or `Nothing in progress.`. Messages starting with an interactive-CLI command (`/help`, `/clear`, `/compact`, `/login`, …) are dropped silently ([src/lib/command-gate.ts](https://github.com/deBilla/marsclaw/blob/main/src/lib/command-gate.ts)).
 
 ### Voice
 
-If `MARSCLAW_VOICE=1` and the Whisper sidecar is running, inbound voice notes are transcribed and prepended with `[Voice]:` so the agent knows to reply via the `speak` MCP tool. See [voice.md](voice.md).
+If voice is enabled (`MARSCLAW_VOICE=1` or `voice_enabled: true`) and the Whisper sidecar is running, inbound voice notes are transcribed and prepended with `[Voice]:` so the agent knows to reply via the `speak` MCP tool. Replies are sent as a voice-note bubble when `KOKORO_FORMAT=ogg`. See [voice.md](voice.md).
 
 ### Verbose protocol logs
 
@@ -133,7 +158,7 @@ Adapter: [src/channels/whatsapp.ts](https://github.com/deBilla/marsclaw/blob/mai
 
 ## Adding a new channel
 
-Roughly ~60 lines. The skeleton:
+The minimal skeleton (real adapters add an allow-list, a rate limiter and media handling — copy [telegram.ts](https://github.com/deBilla/marsclaw/blob/main/src/channels/telegram.ts) as a starting point):
 
 ```ts
 // src/channels/mychannel.ts
@@ -150,15 +175,17 @@ export function createMyChannel(opts: { token: string } & ChannelInit): Channel 
 }
 ```
 
-Then wire it up in [src/index.ts](https://github.com/deBilla/marsclaw/blob/main/src/index.ts) behind a feature flag and the prefix in [src/channels/router.ts](https://github.com/deBilla/marsclaw/blob/main/src/channels/router.ts) is automatic — the router routes by the prefix you used.
+Then wire it up in [src/index.ts](https://github.com/deBilla/marsclaw/blob/main/src/index.ts) behind a feature flag with `router.register('mychannel', ch)` — the [router](https://github.com/deBilla/marsclaw/blob/main/src/channels/router.ts) dispatches outbound sends by that prefix.
 
 ## Failure modes
 
 | Symptom | Channel | Fix |
 |---|---|---|
-| Connected but no replies; `[whatsapp] in append` | WhatsApp | Replaying history (`type: append`); only `notify` is processed. Send a fresh message. |
+| Connected but no replies | WhatsApp | Replaying history (`type: append`); only `notify` is processed. Send a fresh message. |
 | `code=405/428` cycling | WhatsApp | Outdated Baileys protocol. `bun update baileys` |
-| `[whatsapp] giving up after 5 failed connection attempts` | WhatsApp | Too many linked devices, or geo block. Unlink from phone, or try another network. |
+| `whatsapp giving up after 5 failed connection attempts` | WhatsApp | Too many linked devices, or geo block. Unlink from phone, or try another network. |
+| `data/whatsapp-needs-reauth` exists | WhatsApp | Linked device was logged out. `bun run whatsapp reset` and re-scan. |
 | `Same reply 2-3 times` | any | Was a drain-race bug. Pull latest; restart. |
-| `[slack] missing scope` | Slack | Add the listed scope, reinstall app. |
+| `slack file download returned HTML` | Slack | Add `files:read`, reinstall the app (`bun run slack connect`). |
+| `slack rejected — sender not in allow-list` | Slack | Add the logged user id to `allowed_slack_users`. |
 | Telegram bot doesn't see DMs | Telegram | `/setprivacy` in BotFather to disable group-only privacy (irrelevant for DMs but a common red herring). |

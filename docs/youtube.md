@@ -1,6 +1,6 @@
 # YouTube transcripts
 
-Send the bot a YouTube link and it replies with a summary. The transcript is fetched locally, summarised by the running agent (Claude or Gemini), and never leaves your machine beyond the request to youtube.com.
+Send the bot a YouTube link and it replies with a summary. The transcript is fetched locally, summarised by the Claude agent (the Gemini provider has no tool calling, so it can't fetch transcripts), and never leaves your machine beyond the request to youtube.com.
 
 ## Stack
 
@@ -8,7 +8,7 @@ A single MCP tool, [src/mcp/youtube.ts](https://github.com/deBilla/marsclaw/blob
 
 ## Install
 
-Setup will offer this for you on first run — answer `y` to *"Install yt-dlp now?"* and it shells out to `brew install yt-dlp` on macOS, falling back to `pip install --user yt-dlp` elsewhere. Manual route:
+Setup will offer this for you on first run — answer `y` to *"Install yt-dlp now?"* and it shells out to `brew install yt-dlp` on macOS (Homebrew's current version), falling back to `pip3`/`pip install --user yt-dlp==2025.09.05` elsewhere (override the pin with `MARSCLAW_YTDLP_VERSION`). Manual route:
 
 ```bash
 brew install yt-dlp                # macOS
@@ -18,7 +18,7 @@ brew install yt-dlp                # macOS
 bun run setup                      # re-run setup to pin the path into .env
 ```
 
-The MCP server runs as a launchd subprocess with a minimal `PATH`, so setup writes `MARSCLAW_YTDLP_PATH=<absolute-path>` into `.env`. The tool's runtime resolver checks that env var first, then common install dirs (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `/usr/bin`), then asks your login shell — so it almost always finds the binary regardless of how the service was started.
+The MCP server runs as a child of the bot (often under launchd) with a minimal `PATH`, so setup writes `MARSCLAW_YTDLP_PATH=<absolute-path>` into `.env`. The tool's runtime resolver checks that env var first, then common install dirs (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `/usr/bin`), then asks your login shell — so it almost always finds the binary regardless of how the service was started.
 
 ## Use it
 
@@ -41,19 +41,21 @@ Or explicitly: *"summarise this video with timestamps"* / *"transcribe in Spanis
 | `url` | string | (required) | Full URL or bare 11-char video id. Handles watch, youtu.be, shorts, embed, live |
 | `lang` | string | `en` | Preferred caption language code |
 | `timestamps` | bool | `false` | Prefix each line with `[mm:ss]` |
-| `max_chars` | number | `100000` | Cap returned text; rest noted as truncated |
+| `max_chars` | number | `100000` | Cap returned text (clamped to 1,000–500,000); rest noted as truncated |
 
 Returns `# <title> — <channel> · <duration> · lang=<code> · <id>` followed by the transcript.
 
 ## How it works
 
 1. Resolve `yt-dlp` (env override → known paths → login shell).
-2. Run `yt-dlp --skip-download --write-subs --write-auto-subs --sub-langs "<lang>-orig,<lang>" --sub-format json3 --write-info-json --extractor-args "youtube:player_client=ios,android,web"` into a temp dir.
+2. Run `yt-dlp --skip-download --ignore-no-formats-error --no-warnings --no-playlist --write-subs --write-auto-subs --sub-langs "<lang>-orig,<lang>" --sub-format json3 --write-info-json --extractor-args "youtube:player_client=ios,android,web"` into a temp dir (90 s timeout).
 3. If no caption file came through, inspect the info JSON for available languages; pick the best (manual > preferred-lang > original-language > anything) and retry once.
 4. Parse the JSON3 events into plain text. Read title / channel / duration from the info JSON.
 5. Wrap with a header line and return; the agent summarises in its reply.
 
 The `ios`/`android` player clients are required — the default `tv` and `web` clients return empty caption lists for most videos thanks to YouTube's proof-of-origin token gate.
+
+In container mode the tool still runs on the host (it's part of the host MCP server), so `yt-dlp` must be installed on the host, not in the image.
 
 ## Failure modes
 
