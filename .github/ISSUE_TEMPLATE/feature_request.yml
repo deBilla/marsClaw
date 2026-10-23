@@ -1,0 +1,38 @@
+name: Feature / idea
+description: Something you wish marsClaw could do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This repo is public.** Describe the outcome you want, not your private data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to get done?
+      description: Describe the outcome, not the implementation.
+      placeholder: "When I forward a link on WhatsApp I'd like a one-line summary back."
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Roughly what kind of change is it?
+      description: Best guess is fine.
+      options:
+        - New read-only capability (look something up)
+        - New action (send / create / update something — will need approval)
+        - New channel or integration
+        - Change to existing behaviour
+        - Not sure
+  - type: textarea
+    id: data
+    attributes:
+      label: What data or systems does it touch?
+      placeholder: "Gmail, Calendar, WhatsApp, a web API…"
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to build this myself

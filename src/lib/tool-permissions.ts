@@ -370,4 +370,5 @@ export const MARSCLAW_MCP_TOOLS = [
   'mcp__marsclaw__docs_raw',
   'mcp__marsclaw__slides_read',
   'mcp__marsclaw__slides_raw',
+  'mcp__marsclaw__report_issue',
 ];

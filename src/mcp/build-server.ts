@@ -19,6 +19,7 @@ import { docsReadTool, docsRawTool } from './docs.ts';
 import { slidesReadTool, slidesRawTool } from './slides.ts';
 import { googleAccountsTool } from './google_accounts.ts';
 import { youtubeTranscriptTool } from './youtube.ts';
+import { reportIssueTool } from './report_issue.ts';
 
 export const tools = [
   sendTool,
@@ -44,6 +45,7 @@ export const tools = [
   slidesReadTool,
   slidesRawTool,
   youtubeTranscriptTool,
+  reportIssueTool,
 ];
 
 /** Build a fresh Server wired with marsClaw's tools. Caller attaches a transport. */

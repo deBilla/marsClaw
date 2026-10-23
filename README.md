@@ -25,6 +25,7 @@ For a deeper comparison with the multi-tenant cousin, see [docs/vs-nanoclaw.md](
 - **Two agent SDKs, one wire format.** Pick Gemini or Claude. Switch any time with `bun run provider`. Automatic Claude→Gemini failover when Claude is over-quota.
 - **Multi-channel.** Telegram, Slack (Socket Mode), WhatsApp (Baileys, QR auth). Enable any combination.
 - **Voice in and out.** WhatsApp and Telegram voice notes are transcribed locally (faster-whisper); replies can be spoken locally (kokoro-onnx) and arrive as voice notes on WhatsApp and Telegram. No cloud, no Docker.
+- **Report bugs from chat.** Tell it what went wrong (or what you wish it did) and it drafts a GitHub issue from the repo's own templates, scrubs anything private, and posts it after you approve. See [docs/github-issues.md](docs/github-issues.md).
 - **YouTube transcripts.** Send a link, get a summary — the bot fetches captions via `yt-dlp` and the agent summarises in its reply.
 - **Images & files.** WhatsApp images/documents and Slack file uploads are downloaded and passed to the agent as `@<path>` references. The agent can deliver files back via the `send_file` MCP tool (rendered as attachments on WhatsApp; Telegram and Slack currently receive only the caption text).
 - **Google built-in.** OAuth-once, multiple Google accounts, MCP tools for Gmail, Calendar, Contacts, Drive, Sheets, Docs, Slides.

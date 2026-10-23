@@ -58,7 +58,7 @@ Every meaningful capability is **off by default**. Re-enabling each one explicit
 | `allow_shell` | `MARSCLAW_ALLOW_SHELL=1` | `false` | The Bash tool re-appears. A denylist can't make shell safe against injection (`cat .e''nv`, `python -c`, `base64` all bypass any pattern). Treat as the most expensive flag. |
 | `allow_web` | `MARSCLAW_ALLOW_WEB=1` | `false` | `WebFetch` and `WebSearch` become available. Without an allow-list (next row), `WebFetch` can reach any host — i.e. an exfiltration channel. |
 | `allowed_web_domains` | `MARSCLAW_ALLOWED_WEB_DOMAINS=…` | `[]` | When non-empty, `WebFetch` is gated to those hosts (with subdomains). Empty + `allow_web=true` = WebSearch works, but no WebFetch will succeed. |
-| `allow_mutating_tools` | `MARSCLAW_ALLOW_MUTATING_TOOLS=1` | `false` | The agent can send mail (`gmail_send`), write Sheets, create calendar events, and call write-style `*_raw` APIs. Until enabled, these refuse with a clear message instead of running. |
+| `allow_mutating_tools` | `MARSCLAW_ALLOW_MUTATING_TOOLS=1` | `false` | The agent can send mail (`gmail_send`), write Sheets, create calendar events, file public GitHub issues (`report_issue`), and call write-style `*_raw` APIs. Until enabled, these refuse with a clear message instead of running. |
 
 The **secure default posture** (all flags off) makes a prompt-injected agent have *no* third-party egress path: shell can't run, web can't fetch, mutations can't act, the channel allow-lists keep replies to the owner. The worst a successful injection can do is make the bot say something wrong to you.
 

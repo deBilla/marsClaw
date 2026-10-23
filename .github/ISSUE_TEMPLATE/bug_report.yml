@@ -1,0 +1,48 @@
+name: Bug report
+description: marsClaw did something wrong, broke, or behaved unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **This repo is public.** Don't paste message contents, email bodies,
+        tokens, phone numbers or other people's personal data — describe the shape of the problem
+        instead ("a reply to a WhatsApp voice note", not the note itself).
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Where did it happen?
+      options:
+        - Telegram
+        - Slack
+        - WhatsApp
+        - CLI / setup
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Agent provider
+      options:
+        - Claude
+        - Gemini
+        - Not sure
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened vs. what you expected
+      placeholder: "I sent a voice note; marsClaw replied in text instead of voice."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: What you sent (redacted if needed) and roughly when.
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to work on the fix myself

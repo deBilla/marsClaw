@@ -16,7 +16,7 @@ const sidebars = {
       type: 'category',
       label: 'Configure',
       collapsed: false,
-      items: ['configuration', 'channels', 'providers', 'voice', 'youtube', 'google'],
+      items: ['configuration', 'channels', 'providers', 'voice', 'youtube', 'google', 'github-issues'],
     },
     {
       type: 'category',

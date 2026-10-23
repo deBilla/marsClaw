@@ -129,6 +129,15 @@ export interface MarsclawConfig {
   // container publishes this on host loopback only (the host is its sole
   // client). Path endpoints: POST /turn, POST /interrupt, GET /health.
   container_turn_url: string;
+  // GitHub repo (owner/name) the report_issue MCP tool files bug reports and
+  // feature requests into, as a GitHub App installed on that repo only. Empty
+  // (default) disables the tool. The repo is config, never a tool argument, so
+  // the agent can't file into anywhere else. The app credentials are secrets and
+  // live in .env (MARSCLAW_GITHUB_APP_*). See docs/github-issues.md.
+  github_issue_repo: string;
+  // Cap on issues filed per rolling 24 h — bounds a runaway or hijacked turn,
+  // especially with allow_mutating_tools=true where no human approves each one.
+  github_issues_per_day: number;
 }
 
 function defaults(): MarsclawConfig {
@@ -166,6 +175,8 @@ function defaults(): MarsclawConfig {
     egress_mode: 'off',
     runtime: 'in-process',
     container_turn_url: 'http://127.0.0.1:8770',
+    github_issue_repo: '',
+    github_issues_per_day: 5,
   };
 }
 
@@ -311,6 +322,11 @@ export function loadConfig(): MarsclawConfig {
 
   const envTurnUrl = process.env.MARSCLAW_CONTAINER_TURN_URL;
   if (envTurnUrl) cfg.container_turn_url = envTurnUrl;
+
+  const envIssueRepo = process.env.MARSCLAW_GITHUB_ISSUE_REPO;
+  if (envIssueRepo !== undefined) cfg.github_issue_repo = envIssueRepo.trim().replace(/^\/+|\/+$/g, '');
+  const envIssuesPerDay = parseInt10(process.env.MARSCLAW_GITHUB_ISSUES_PER_DAY);
+  if (envIssuesPerDay !== undefined) cfg.github_issues_per_day = envIssuesPerDay;
 
   cached = Object.freeze(cfg);
   return cached;

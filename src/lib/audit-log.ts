@@ -42,7 +42,8 @@ export interface AuditRecord {
     | 'url-allowlist'
     | 'shell-disabled'
     | 'web-disabled'
-    | 'egress-gateway';
+    | 'egress-gateway'
+    | 'report-issue';
 }
 
 // Path is resolved lazily so the env var can be set before each call. Each

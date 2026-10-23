@@ -38,6 +38,7 @@ marsclaw/
 │   │   ├── send_file.ts    # send_file (allowed_paths + sensitive-path gate)
 │   │   ├── speak.ts        # kokoro TTS → outbox row with audio_path
 │   │   ├── youtube.ts      # youtube_transcript (yt-dlp)
+│   │   ├── report_issue.ts # report_issue → GitHub issue (mutation-gated, capped)
 │   │   ├── gmail.ts        # gmail_recent / search / get / send
 │   │   ├── contacts.ts     # contacts_search
 │   │   ├── calendar.ts     # list / create / raw
@@ -46,6 +47,10 @@ marsclaw/
 │   │   ├── docs.ts         # read / raw
 │   │   ├── slides.ts       # read / raw
 │   │   └── google_accounts.ts
+│   │
+│   ├── github/
+│   │   ├── app.ts          # GitHub App JWT → installation token, create/search issues
+│   │   └── issue-templates.ts # issue body from .github/ISSUE_TEMPLATE + public-repo redaction
 │   │
 │   ├── google/
 │   │   ├── auth.ts         # OAuth installed-app flow, multi-account index

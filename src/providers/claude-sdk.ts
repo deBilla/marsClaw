@@ -201,6 +201,25 @@ if (AGENT_SUBPROCESS_ENV) {
 // HOME/PATH passthrough in buildMcpChildEnv is all it needs.
 const DATA_PLATFORM_DIR = '/Users/dimuthu/mp-ai/data-platform-mcp';
 
+// The report_issue tool's GitHub App credentials. Handed to OUR MCP server only,
+// not through buildMcpChildEnv, so third-party servers (data-platform) never see them.
+const GITHUB_ISSUE_ENV = [
+  'MARSCLAW_GITHUB_ISSUE_REPO',
+  'MARSCLAW_GITHUB_ISSUES_PER_DAY',
+  'MARSCLAW_GITHUB_APP_ID',
+  'MARSCLAW_GITHUB_APP_INSTALLATION_ID',
+  'MARSCLAW_GITHUB_APP_PRIVATE_KEY',
+];
+
+function githubIssueEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of GITHUB_ISSUE_ENV) {
+    const v = process.env[key];
+    if (v !== undefined) env[key] = v;
+  }
+  return env;
+}
+
 function mcpServers(threadId: string): Record<string, McpServerConfig> {
   return {
     marsclaw: {
@@ -209,7 +228,7 @@ function mcpServers(threadId: string): Record<string, McpServerConfig> {
       // lookup breaks under launchd, whose PATH won't include nvm/asdf dirs.
       command: process.execPath,
       args: ['run', 'src/mcp/server.ts'],
-      env: buildMcpChildEnv(threadId),
+      env: { ...buildMcpChildEnv(threadId), ...githubIssueEnv() },
     },
     'data-platform': {
       type: 'stdio',
